@@ -7,10 +7,18 @@ import net.minecraft.world.phys.Vec3;
 
 final class PlayerMovementController {
     private static final int MAX_LOOKAHEAD_NODES = 4;
-    private static final int LOCAL_RECOVERY_TICKS = 12;
-    private static final int LOCAL_REPOSITION_TICKS = 20;
-    private static final int REPLAN_TICKS = 30;
-    private static final int REPLAN_BACKOFF_TICKS = 12;
+    private static final int LOCAL_RECOVERY_TICKS = 20;
+    private static final int LOCAL_REPOSITION_TICKS = 40;
+    private static final int REPLAN_TICKS = 60;
+    private static final int REPLAN_BACKOFF_TICKS = 20;
+    private static final int PATH_REPLAN_COOLDOWN_TICKS = 20;
+    private static final int STUCK_CHECK_INTERVAL_TICKS = 5;
+    private static final double STUCK_PROGRESS_THRESHOLD_SQR = 4.0E-4D;
+    private static final double ARRIVE_XZ_DISTANCE_SQR = 0.36D;
+    private static final double ARRIVE_Y_ABS = 1.0D;
+    private static final double WAYPOINT_ADVANCE_XZ_DISTANCE_SQR = 0.49D;
+    private static final double WAYPOINT_ADVANCE_Y_ABS = 1.1D;
+    private static final double LIQUID_ASCENT_SPEED = 0.04D;
 
     private final AIPlayerEntity entity;
     private List<PathNode> activePath = List.of();
@@ -21,6 +29,8 @@ final class PlayerMovementController {
     private Vec3 lastSample = Vec3.ZERO;
     private int stuckTicks;
     private long lastReplanTick;
+    private long lastPathRequestTick;
+    private long lastStuckCheckTick;
 
     PlayerMovementController(AIPlayerEntity entity) {
         this.entity = entity;
@@ -32,14 +42,28 @@ final class PlayerMovementController {
             this.pathStatus = "目标不可达";
             return false;
         }
+        long gameTime = this.entity.level().getGameTime();
+        boolean sameTargetRegion = this.targetPos != null && this.targetPos.distSqr(resolvedTarget) <= 4.0D;
         if (this.targetPos != null && this.targetPos.distSqr(resolvedTarget) <= 1.0D && !this.activePath.isEmpty()) {
             this.speedModifier = speedModifier;
             return true;
         }
+        if (sameTargetRegion && gameTime - this.lastPathRequestTick < PATH_REPLAN_COOLDOWN_TICKS && !this.activePath.isEmpty()) {
+            this.targetPos = resolvedTarget.immutable();
+            this.speedModifier = speedModifier;
+            this.pathStatus = "沿用冷却期内路径";
+            return true;
+        }
+        if (sameTargetRegion && gameTime - this.lastPathRequestTick < PATH_REPLAN_COOLDOWN_TICKS && this.activePath.isEmpty()) {
+            this.targetPos = resolvedTarget.immutable();
+            this.speedModifier = speedModifier;
+            this.pathStatus = "路径重算冷却中";
+            return false;
+        }
 
         this.targetPos = resolvedTarget.immutable();
         this.speedModifier = speedModifier;
-        long gameTime = this.entity.level().getGameTime();
+        this.lastPathRequestTick = gameTime;
         boolean budgetGranted = TeamKnowledge.tryAcquirePathBudget(this.entity, gameTime);
         if (!budgetGranted && !this.activePath.isEmpty()) {
             this.pathStatus = "团队路径预算忙，沿用当前路径";
@@ -54,6 +78,7 @@ final class PlayerMovementController {
         this.lastSample = this.entity.position();
         this.stuckTicks = 0;
         this.lastReplanTick = gameTime;
+        this.lastStuckCheckTick = gameTime;
         return !this.activePath.isEmpty();
     }
 
@@ -63,6 +88,7 @@ final class PlayerMovementController {
         this.pathIndex = 0;
         this.pathStatus = "空闲";
         this.stuckTicks = 0;
+        this.lastStuckCheckTick = 0L;
         this.entity.setZza(0.0F);
         this.entity.setXxa(0.0F);
         this.entity.setSpeed(0.0F);
@@ -78,9 +104,9 @@ final class PlayerMovementController {
             return;
         }
         if (this.activePath.isEmpty()) {
-            this.requestPathTo(this.targetPos, this.speedModifier);
+            boolean requested = this.requestPathTo(this.targetPos, this.speedModifier);
             if (this.activePath.isEmpty()) {
-                this.pathStatus = "无可用路径";
+                this.pathStatus = requested ? "无可用路径" : this.pathStatus;
                 return;
             }
         }
@@ -113,12 +139,19 @@ final class PlayerMovementController {
         }
         if (this.entity.isInWater() || this.entity.isUnderWater() || this.entity.isInLava()) {
             Vec3 motion = this.entity.getDeltaMovement();
-            this.entity.setDeltaMovement(motion.x, Math.max(motion.y, 0.08D), motion.z);
+            this.entity.setDeltaMovement(motion.x * 0.92D, Math.max(motion.y, LIQUID_ASCENT_SPEED), motion.z * 0.92D);
         }
     }
 
     boolean hasReachedTarget(BlockPos target) {
-        return target != null && this.entity.distanceToSqr(Vec3.atCenterOf(target)) <= 4.0D;
+        if (target == null) {
+            return false;
+        }
+        Vec3 center = Vec3.atCenterOf(target);
+        double dx = center.x - this.entity.getX();
+        double dz = center.z - this.entity.getZ();
+        return dx * dx + dz * dz <= ARRIVE_XZ_DISTANCE_SQR
+                && Math.abs(center.y - this.entity.getY()) <= ARRIVE_Y_ABS;
     }
 
     boolean isPathActive() {
@@ -156,6 +189,7 @@ final class PlayerMovementController {
         this.targetPos = null;
         this.pathIndex = 0;
         this.stuckTicks = 0;
+        this.lastStuckCheckTick = 0L;
         this.entity.setZza(0.0F);
         this.entity.setXxa(0.0F);
         this.entity.setSpeed(0.0F);
@@ -164,7 +198,7 @@ final class PlayerMovementController {
     }
 
     private Vec3 chooseWaypoint() {
-        while (this.pathIndex < this.activePath.size() - 1 && this.entity.distanceToSqr(this.activePath.get(this.pathIndex).position()) <= 1.15D) {
+        while (this.pathIndex < this.activePath.size() - 1 && this.isNearWaypoint(this.activePath.get(this.pathIndex).position(), WAYPOINT_ADVANCE_XZ_DISTANCE_SQR, WAYPOINT_ADVANCE_Y_ABS)) {
             this.pathIndex++;
         }
         Vec3 anchor = this.entity.position();
@@ -184,16 +218,22 @@ final class PlayerMovementController {
     }
 
     private double computeAppliedSpeed(double distanceToWaypoint) {
-        if (distanceToWaypoint <= 1.0D) {
+        if (this.entity.isInWater() || this.entity.isUnderWater() || this.entity.isInLava()) {
+            return Math.min(this.speedModifier, 0.58D);
+        }
+        if (distanceToWaypoint <= 0.36D) {
+            return Math.min(this.speedModifier, 0.62D);
+        }
+        if (distanceToWaypoint <= 2.25D) {
             return Math.min(this.speedModifier, 0.82D);
         }
-        if (distanceToWaypoint <= 3.0D) {
-            return Math.min(this.speedModifier, 0.95D);
+        if (distanceToWaypoint <= 9.0D) {
+            return Math.min(this.speedModifier, 0.96D);
         }
-        if (distanceToWaypoint >= 20.0D) {
-            return Math.max(this.speedModifier, 1.2D);
+        if (distanceToWaypoint >= 64.0D) {
+            return Mth.clamp(this.speedModifier, 1.0D, 1.18D);
         }
-        return this.speedModifier;
+        return Math.min(this.speedModifier, 1.02D);
     }
 
     private Vec3 selectLiquidEscapeWaypoint() {
@@ -211,11 +251,16 @@ final class PlayerMovementController {
     }
 
     private void detectStuckAndRecover(Vec3 waypoint) {
+        long gameTime = this.entity.level().getGameTime();
+        if (gameTime - this.lastStuckCheckTick < STUCK_CHECK_INTERVAL_TICKS) {
+            return;
+        }
+        this.lastStuckCheckTick = gameTime;
         Vec3 current = this.entity.position();
-        if (current.distanceToSqr(this.lastSample) < 0.028D) {
-            this.stuckTicks++;
+        if (current.distanceToSqr(this.lastSample) < STUCK_PROGRESS_THRESHOLD_SQR) {
+            this.stuckTicks += STUCK_CHECK_INTERVAL_TICKS;
         } else {
-            this.stuckTicks = 0;
+            this.stuckTicks = Math.max(0, this.stuckTicks - STUCK_CHECK_INTERVAL_TICKS);
             this.lastSample = current;
         }
         if (this.stuckTicks < LOCAL_RECOVERY_TICKS) {
@@ -231,7 +276,7 @@ final class PlayerMovementController {
         double offsetX = Mth.cos(yaw) * side;
         double offsetZ = -Mth.sin(yaw) * side;
         Vec3 sidestep = this.entity.position().add(offsetX, 0.0D, offsetZ);
-        this.entity.getMoveControl().setWantedPosition(sidestep.x, sidestep.y, sidestep.z, Math.max(0.9D, this.speedModifier));
+        this.entity.getMoveControl().setWantedPosition(sidestep.x, sidestep.y, sidestep.z, Math.max(0.65D, Math.min(this.speedModifier, 0.92D)));
 
         if (this.stuckTicks >= LOCAL_REPOSITION_TICKS && this.targetPos != null) {
             BlockPos localStandPos = this.entity.runtimeResolveMovementTarget(this.targetPos);
@@ -244,7 +289,6 @@ final class PlayerMovementController {
         }
 
         if (this.stuckTicks >= REPLAN_TICKS && this.targetPos != null) {
-            long gameTime = this.entity.level().getGameTime();
             if (gameTime - this.lastReplanTick < REPLAN_BACKOFF_TICKS) {
                 this.pathStatus = "等待重算退避窗口";
                 return;
@@ -256,6 +300,7 @@ final class PlayerMovementController {
                 this.stuckTicks = 0;
                 this.lastSample = this.entity.position();
                 this.lastReplanTick = gameTime;
+                this.lastPathRequestTick = gameTime;
                 if (!this.activePath.isEmpty() && waypoint != null && this.entity.runtimeCanDirectlyTraverse(this.entity.position(), waypoint)) {
                     this.pathStatus = "重算后恢复推进";
                 }
@@ -263,5 +308,14 @@ final class PlayerMovementController {
                 this.pathStatus = "团队路径预算忙，等待重算窗口";
             }
         }
+    }
+
+    private boolean isNearWaypoint(Vec3 waypoint, double maxXzDistanceSqr, double maxYAbs) {
+        double dx = waypoint.x - this.entity.getX();
+        double dz = waypoint.z - this.entity.getZ();
+        if (dx * dx + dz * dz > maxXzDistanceSqr) {
+            return false;
+        }
+        return Math.abs(waypoint.y - this.entity.getY()) <= maxYAbs;
     }
 }

@@ -8,18 +8,22 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
 final class AIPlayerMoveControl extends MoveControl {
-    private static final float MAX_TURN_DEGREES = 18.0F;
-    private static final float BRAKE_TURN_DEGREES = 78.0F;
+    private static final float MAX_TURN_DEGREES = 16.0F;
+    private static final float BRAKE_TURN_DEGREES = 62.0F;
     private static final float NEAR_TARGET_SLOWDOWN = 0.72F;
     private static final float VERY_NEAR_TARGET_SLOWDOWN = 0.48F;
     private static final float MIN_FORWARD_INPUT = 0.18F;
     private static final float MAX_STRAFE_INPUT = 0.82F;
     private static final float FORWARD_LERP = 0.38F;
     private static final float STRAFE_LERP = 0.30F;
-    private static final float SPEED_LERP = 0.26F;
+    private static final float SPEED_LERP = 0.16F;
     private static final double JUMP_HORIZONTAL_DISTANCE = 1.45D;
     private static final double FRONT_PROBE_DISTANCE = 0.75D;
-    private static final double WATER_ASCENT_SPEED = 0.08D;
+    private static final double WATER_ASCENT_SPEED = 0.04D;
+    private static final float WALK_SPEED_CAP = 0.10F;
+    private static final float SPRINT_SPEED_CAP = 0.13F;
+    private static final float SNEAK_SPEED_CAP = 0.05F;
+    private static final float WATER_SPEED_CAP = 0.065F;
 
     private final AIPlayerEntity companion;
     private float smoothedForward;
@@ -69,11 +73,18 @@ final class AIPlayerMoveControl extends MoveControl {
         this.companion.getLookControl().setLookAt(this.wantedX, this.wantedY + 0.6D, this.wantedZ, 30.0F, 30.0F);
 
         double attributeSpeed = this.companion.getAttributeValue(Attributes.MOVEMENT_SPEED);
-        float baseSpeed = (float) Math.max(MIN_SPEED, this.speedModifier * attributeSpeed);
+        float baseSpeed = (float) Mth.clamp(this.speedModifier * attributeSpeed, MIN_SPEED, 0.18D);
         float yawDelta = Mth.wrapDegrees(targetYaw - nextYaw);
         float absYawDelta = Math.abs(yawDelta);
         float turnFactor = Mth.clamp(1.0F - absYawDelta / 110.0F, 0.22F, 1.0F);
         float targetSpeed = baseSpeed * turnFactor;
+        float maxAllowedSpeed = this.speedModifier > 1.08D ? SPRINT_SPEED_CAP : WALK_SPEED_CAP;
+        if (this.companion.isShiftKeyDown()) {
+            maxAllowedSpeed = SNEAK_SPEED_CAP;
+        }
+        if (this.companion.isInWater() || this.companion.isUnderWater() || this.companion.isInLava()) {
+            maxAllowedSpeed = Math.min(maxAllowedSpeed, WATER_SPEED_CAP);
+        }
         if (horizontalDistanceSqr < 1.25D) {
             targetSpeed *= NEAR_TARGET_SLOWDOWN;
         }
@@ -83,6 +94,7 @@ final class AIPlayerMoveControl extends MoveControl {
         if (absYawDelta > BRAKE_TURN_DEGREES) {
             targetSpeed *= 0.58F;
         }
+        targetSpeed = Math.min(targetSpeed, maxAllowedSpeed);
 
         float radians = yawDelta * ((float) Math.PI / 180.0F);
         float targetForward = Mth.clamp(Mth.cos(radians), MIN_FORWARD_INPUT, 1.0F);
@@ -100,7 +112,10 @@ final class AIPlayerMoveControl extends MoveControl {
         this.companion.setZza(this.smoothedForward);
         this.companion.setXxa(this.smoothedStrafe);
         double horizontalDistance = Math.sqrt(horizontalDistanceSqr);
-        this.companion.setSprinting(this.speedModifier > 1.12D && absYawDelta < 34.0F && horizontalDistance > 3.0D);
+        this.companion.setSprinting(this.speedModifier > 1.08D
+                && absYawDelta < 28.0F
+                && horizontalDistance > 4.0D
+                && !(this.companion.isInWater() || this.companion.isUnderWater() || this.companion.isInLava()));
 
         if (shouldJump(dx, dy, dz, horizontalDistance)) {
             this.companion.getJumpControl().jump();
@@ -147,7 +162,7 @@ final class AIPlayerMoveControl extends MoveControl {
         }
         if (dy > -0.05D || this.companion.horizontalCollision || this.companion.isUnderWater()) {
             Vec3 motion = this.companion.getDeltaMovement();
-            this.companion.setDeltaMovement(motion.x, Math.max(motion.y, WATER_ASCENT_SPEED), motion.z);
+            this.companion.setDeltaMovement(motion.x * 0.9D, Math.max(motion.y, WATER_ASCENT_SPEED), motion.z * 0.9D);
         }
     }
 }

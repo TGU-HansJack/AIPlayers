@@ -20,14 +20,20 @@ public final class PathCache {
         String dimension = entity.level().dimension().toString();
         ChunkPos startChunk = new ChunkPos(startPos);
         ChunkPos endChunk = new ChunkPos(target);
+        int startRegionX = startPos.getX() >> 2;
+        int startRegionY = startPos.getY() >> 2;
+        int startRegionZ = startPos.getZ() >> 2;
+        int endRegionX = target.getX() >> 2;
+        int endRegionY = target.getY() >> 2;
+        int endRegionZ = target.getZ() >> 2;
         CacheKey key = new CacheKey(
                 dimension,
-                startPos.getX(),
-                startPos.getY(),
-                startPos.getZ(),
-                target.getX(),
-                target.getY(),
-                target.getZ(),
+                startRegionX,
+                startRegionY,
+                startRegionZ,
+                endRegionX,
+                endRegionY,
+                endRegionZ,
                 startChunk.x,
                 startChunk.z,
                 endChunk.x,
@@ -55,12 +61,12 @@ public final class PathCache {
 
     private record CacheKey(
             String dimension,
-            int startX,
-            int startY,
-            int startZ,
-            int endX,
-            int endY,
-            int endZ,
+            int startRegionX,
+            int startRegionY,
+            int startRegionZ,
+            int endRegionX,
+            int endRegionY,
+            int endRegionZ,
             int startChunkX,
             int startChunkZ,
             int endChunkX,
