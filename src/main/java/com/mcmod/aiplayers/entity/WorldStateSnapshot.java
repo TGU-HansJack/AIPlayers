@@ -37,5 +37,7 @@ public record WorldStateSnapshot(
         String observation,
         String inventory,
         String lastFeedback,
-        String cognition) {
+        String cognition,
+        int oreCount,
+        boolean shelterReady) {
 }

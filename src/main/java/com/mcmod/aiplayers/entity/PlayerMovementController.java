@@ -11,7 +11,7 @@ final class PlayerMovementController {
     private BlockPos targetPos;
     private int pathIndex;
     private double speedModifier = 1.0D;
-    private String pathStatus = "??";
+    private String pathStatus = "\u7a7a\u95f2";
     private Vec3 lastSample = Vec3.ZERO;
     private int stuckTicks;
 
@@ -22,7 +22,7 @@ final class PlayerMovementController {
     boolean requestPathTo(BlockPos target, double speedModifier) {
         BlockPos resolvedTarget = this.entity.runtimeResolveMovementTarget(target);
         if (resolvedTarget == null) {
-            this.pathStatus = "?????";
+            this.pathStatus = "\u76ee\u6807\u4e0d\u53ef\u8fbe";
             return false;
         }
         if (this.targetPos != null && this.targetPos.distSqr(resolvedTarget) <= 1.0D && !this.activePath.isEmpty()) {
@@ -35,7 +35,7 @@ final class PlayerMovementController {
         long gameTime = this.entity.level().getGameTime();
         boolean budgetGranted = TeamKnowledge.tryAcquirePathBudget(this.entity, gameTime);
         if (!budgetGranted && !this.activePath.isEmpty()) {
-            this.pathStatus = "??????????????";
+            this.pathStatus = "\u56e2\u961f\u8def\u5f84\u9884\u7b97\u5fd9\uff0c\u6cbf\u7528\u5f53\u524d\u8def\u5f84";
             return true;
         }
 
@@ -43,7 +43,7 @@ final class PlayerMovementController {
                 ? AgentPathPlanner.plan(this.entity, this.targetPos)
                 : List.of(new PathNode(Vec3.atCenterOf(this.targetPos)));
         this.pathIndex = 0;
-        this.pathStatus = this.activePath.size() > 1 ? "?????" : (budgetGranted ? "????" : "?????????");
+        this.pathStatus = this.activePath.size() > 1 ? "\u8def\u5f84\u5df2\u89c4\u5212" : (budgetGranted ? "\u76f4\u7ebf\u63a5\u8fd1" : "\u9884\u7b97\u5fd9\uff0c\u5148\u76f4\u7ebf\u9760\u8fd1");
         this.lastSample = this.entity.position();
         this.stuckTicks = 0;
         return !this.activePath.isEmpty();
@@ -53,7 +53,7 @@ final class PlayerMovementController {
         this.activePath = List.of();
         this.targetPos = null;
         this.pathIndex = 0;
-        this.pathStatus = "??";
+        this.pathStatus = "\u7a7a\u95f2";
         this.stuckTicks = 0;
         this.entity.setZza(0.0F);
         this.entity.setXxa(0.0F);
@@ -71,7 +71,7 @@ final class PlayerMovementController {
         if (this.activePath.isEmpty()) {
             this.requestPathTo(this.targetPos, this.speedModifier);
             if (this.activePath.isEmpty()) {
-                this.pathStatus = "?????";
+                this.pathStatus = "\u65e0\u53ef\u7528\u8def\u5f84";
                 return;
             }
         }
@@ -91,8 +91,8 @@ final class PlayerMovementController {
         this.entity.getMoveControl().setWantedPosition(waypoint.x, waypoint.y, waypoint.z, appliedSpeed);
         this.entity.setSprinting(appliedSpeed > 1.18D);
         this.pathStatus = (this.entity.isInWater() || this.entity.isUnderWater() || this.entity.isInLava())
-                ? "???????"
-                : (this.pathIndex < this.activePath.size() - 1 ? "?????" : "??????");
+                ? "\u6db2\u4f53\u8131\u56f0\u63a8\u8fdb\u4e2d"
+                : (this.pathIndex < this.activePath.size() - 1 ? "\u6cbf\u8def\u5f84\u63a8\u8fdb" : "\u6700\u7ec8\u63a5\u8fd1\u76ee\u6807");
         if (this.entity.isInWater() || this.entity.isUnderWater() || this.entity.isInLava()) {
             Vec3 motion = this.entity.getDeltaMovement();
             this.entity.setDeltaMovement(motion.x, Math.max(motion.y, 0.08D), motion.z);
@@ -123,7 +123,7 @@ final class PlayerMovementController {
         this.entity.setZza(0.0F);
         this.entity.setXxa(0.0F);
         this.entity.setSpeed(0.0F);
-        this.pathStatus = "???";
+        this.pathStatus = "\u5df2\u5230\u8fbe";
     }
 
     private void detectStuckAndRecover() {
@@ -138,7 +138,7 @@ final class PlayerMovementController {
             return;
         }
 
-        this.pathStatus = "?????";
+        this.pathStatus = "\u5c40\u90e8\u907f\u969c\u4e2d";
         if (this.entity.onGround()) {
             this.entity.getJumpControl().jump();
         }
@@ -155,7 +155,7 @@ final class PlayerMovementController {
                 this.targetPos = localStandPos;
                 this.activePath = List.of(new PathNode(Vec3.atCenterOf(localStandPos)));
                 this.pathIndex = 0;
-                this.pathStatus = "?????????";
+                this.pathStatus = "\u5207\u6362\u5230\u5c40\u90e8\u53ef\u7ad9\u7acb\u70b9";
             }
         }
 
@@ -164,11 +164,11 @@ final class PlayerMovementController {
             if (TeamKnowledge.tryAcquirePathBudget(this.entity, gameTime)) {
                 this.activePath = AgentPathPlanner.plan(this.entity, this.targetPos);
                 this.pathIndex = 0;
-                this.pathStatus = "????";
+                this.pathStatus = "\u8def\u5f84\u91cd\u7b97";
                 this.stuckTicks = 0;
                 this.lastSample = this.entity.position();
             } else {
-                this.pathStatus = "??????????????";
+                this.pathStatus = "\u56e2\u961f\u8def\u5f84\u9884\u7b97\u5fd9\uff0c\u7b49\u5f85\u91cd\u7b97\u7a97\u53e3";
             }
         }
     }

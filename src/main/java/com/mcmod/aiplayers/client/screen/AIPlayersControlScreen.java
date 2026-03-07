@@ -18,7 +18,7 @@ import org.lwjgl.glfw.GLFW;
 public class AIPlayersControlScreen extends Screen {
     private static final int HEADER_TOP = 12;
     private static final int CONTENT_TOP = 48;
-    private static final int SUMMARY_HEIGHT = 54;
+    private static final int SUMMARY_HEIGHT = 116;
     private static final int FOOTER_HEIGHT = 52;
     private static final int BUTTON_WIDTH = 100;
     private final List<AIPlayerEntity> nearby = new ArrayList<>();
@@ -180,6 +180,11 @@ public class AIPlayersControlScreen extends Screen {
 
     private void addActionButton(int x, int y, String label, Runnable action) {
         this.addRenderableWidget(Button.builder(Component.literal(label), ignored -> action.run()).bounds(x, y, 100, 20).build());
+    }
+
+    private int drawSummaryLine(GuiGraphics graphics, int y, String text, int color, int maxWidth) {
+        graphics.drawString(this.font, this.font.plainSubstrByWidth(text, maxWidth), 12, y, color);
+        return y + 12;
     }
 
     private void refreshNearbyAndRebuild() {

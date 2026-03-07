@@ -1,4 +1,4 @@
-﻿# AI Players
+# AI Players
 
 AI Players 是一个基于 Forge `1.21.11` 与 Java `21` 的 Minecraft Java 版模组原型。
 

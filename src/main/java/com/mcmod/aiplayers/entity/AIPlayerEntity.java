@@ -80,6 +80,12 @@ public class AIPlayerEntity extends Zombie {
     private static final EntityDataAccessor<String> DATA_MODE = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<String> DATA_BLUEPRINT = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<String> DATA_STATUS = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<String> DATA_GOAL = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<String> DATA_ACTION = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<String> DATA_PATH = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<String> DATA_MEMORY = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<String> DATA_LLM = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<String> DATA_PLAN = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<String> DATA_OBSERVATION = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<String> DATA_INVENTORY = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
     private static final String DEFAULT_AI_NAME = "Companion";
@@ -196,6 +202,12 @@ public class AIPlayerEntity extends Zombie {
         builder.define(DATA_MODE, AIPlayerMode.IDLE.commandName());
         builder.define(DATA_BLUEPRINT, DEFAULT_BLUEPRINT_ID);
         builder.define(DATA_STATUS, "模式：待命 | 生命：20/20 | 背包：0/36");
+        builder.define(DATA_GOAL, "待命");
+        builder.define(DATA_ACTION, "暂无动作");
+        builder.define(DATA_PATH, "路径未启动");
+        builder.define(DATA_MEMORY, "暂无记忆");
+        builder.define(DATA_LLM, "本地规划");
+        builder.define(DATA_PLAN, "暂无计划");
         builder.define(DATA_OBSERVATION, "周围一切正常。");
         builder.define(DATA_INVENTORY, "空");
     }
@@ -3004,6 +3016,22 @@ public class AIPlayerEntity extends Zombie {
         return key != null && (key.getPath().endsWith("_ore") || key.getPath().contains("ancient_debris"));
     }
 
+    private boolean isOreResourceItem(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) {
+            return false;
+        }
+        Identifier key = BuiltInRegistries.ITEM.getKey(stack.getItem());
+        if (key == null) {
+            return false;
+        }
+        String path = key.getPath();
+        return path.endsWith("_ore")
+                || path.startsWith("raw_")
+                || path.endsWith("_ingot")
+                || path.contains("ancient_debris")
+                || path.endsWith("_gem");
+    }
+
     private boolean isExposed(BlockPos pos) {
         for (Direction direction : Direction.values()) {
             if (this.level().isEmptyBlock(pos.relative(direction))) {
@@ -3445,6 +3473,36 @@ public class AIPlayerEntity extends Zombie {
         return synced == null || synced.isBlank() ? this.getInventoryPreview() : synced;
     }
 
+    public String getClientGoalSummary() {
+        String synced = this.entityData.get(DATA_GOAL);
+        return synced == null || synced.isBlank() ? this.latestAgentGoal : synced;
+    }
+
+    public String getClientActionSummary() {
+        String synced = this.entityData.get(DATA_ACTION);
+        return synced == null || synced.isBlank() ? this.agentRuntime.currentActionLabel() : synced;
+    }
+
+    public String getClientPathSummary() {
+        String synced = this.entityData.get(DATA_PATH);
+        return synced == null || synced.isBlank() ? this.agentRuntime.pathStatus() : synced;
+    }
+
+    public String getClientMemorySummary() {
+        String synced = this.entityData.get(DATA_MEMORY);
+        return synced == null || synced.isBlank() ? this.getMemorySummary() : synced;
+    }
+
+    public String getClientLlmSummary() {
+        String synced = this.entityData.get(DATA_LLM);
+        return synced == null || synced.isBlank() ? AIServiceManager.getLastStatusText() : synced;
+    }
+
+    public String getClientPlanSummary() {
+        String synced = this.entityData.get(DATA_PLAN);
+        return synced == null || synced.isBlank() ? this.getPlanSummary() : synced;
+    }
+
     private String formatPos(BlockPos pos) {
         return pos.getX() + "," + pos.getY() + "," + pos.getZ();
     }
@@ -3483,7 +3541,15 @@ public class AIPlayerEntity extends Zombie {
 
     private void syncClientTelemetry() {
         this.lastTelemetrySyncTick = this.tickCount;
+        AgentSnapshot snapshot = this.agentRuntime.snapshot();
+        PlannedAction currentAction = snapshot.currentPlan() == null ? null : snapshot.currentPlan().findAction(snapshot.currentAction());
         this.entityData.set(DATA_STATUS, this.clipSyncText(this.buildClientStatusLine()));
+        this.entityData.set(DATA_GOAL, this.clipSyncText(snapshot.currentGoal().label() + " | 条件=" + snapshot.currentPlan().goalConditionSummary()));
+        this.entityData.set(DATA_ACTION, this.clipSyncText(snapshot.currentAction() + (currentAction == null ? "" : " | " + currentAction.detailSummary())));
+        this.entityData.set(DATA_PATH, this.clipSyncText(snapshot.pathStatus()));
+        this.entityData.set(DATA_MEMORY, this.clipSyncText(snapshot.memory().recentSummary()));
+        this.entityData.set(DATA_LLM, this.clipSyncText(snapshot.llmStatus() + " | " + snapshot.plannerStatus()));
+        this.entityData.set(DATA_PLAN, this.clipSyncText(snapshot.currentPlan().summary()));
         this.entityData.set(DATA_OBSERVATION, this.clipSyncText(this.lastObservation == null || this.lastObservation.isBlank() ? DEFAULT_OBSERVATION : this.lastObservation));
         this.entityData.set(DATA_INVENTORY, this.clipSyncText(this.getInventoryPreview()));
     }
@@ -3593,27 +3659,27 @@ public class AIPlayerEntity extends Zombie {
     private String buildCognitiveSummary() {
         List<String> parts = new ArrayList<>();
         if (this.observedHostile != null && this.observedHostile.isAlive()) {
-            parts.add("感知到敌对威胁");
+            parts.add("\u611f\u77e5\u5230\u654c\u5bf9\u5a01\u80c1");
         }
         if (this.observedDrop != null && this.observedDrop.isAlive()) {
-            parts.add("附近有可拾取掉落物");
+            parts.add("\u9644\u8fd1\u6709\u53ef\u62fe\u53d6\u6389\u843d\u7269");
         }
         if (this.hasLowFoodSupply()) {
-            parts.add("食物偏少");
+            parts.add("\u98df\u7269\u504f\u5c11");
         }
         if (this.hasLowTools()) {
-            parts.add("食物偏少");
+            parts.add("\u5de5\u5177\u4e0d\u8db3");
         }
         if (this.rememberedLog != null) {
-            parts.add("记得木材位置");
+            parts.add("\u8bb0\u5f97\u6728\u6750\u4f4d\u7f6e");
         }
         if (this.rememberedOre != null) {
-            parts.add("记得木材位置");
+            parts.add("\u8bb0\u5f97\u77ff\u70b9\u4f4d\u7f6e");
         }
         if (parts.isEmpty()) {
-            return "环境稳定，继续观察";
+            return "\u73af\u5883\u7a33\u5b9a\uff0c\u7ee7\u7eed\u89c2\u5bdf";
         }
-        return String.join("?", parts);
+        return String.join("\uff1b", parts);
     }
 
     private void sendOwnerAlert(String message, boolean force) {
@@ -3673,11 +3739,16 @@ public class AIPlayerEntity extends Zombie {
     WorldStateSnapshot captureWorldStateSnapshot() {
         ServerPlayer owner = this.getOwnerPlayer();
         int logs = 0;
+        int oreItems = 0;
         for (ItemStack stack : this.backpack) {
             if (this.isLogItem(stack)) {
                 logs += stack.getCount();
             }
+            if (this.isOreResourceItem(stack)) {
+                oreItems += stack.getCount();
+            }
         }
+        boolean shelterReady = this.shelterAnchor != null && this.findNextShelterPlacement() == null;
         return new WorldStateSnapshot(
                 this.safeMode(),
                 owner != null,
@@ -3713,7 +3784,9 @@ public class AIPlayerEntity extends Zombie {
                 this.getObservationSummary(),
                 this.getInventoryPreview(),
                 this.lastTaskFeedback,
-                this.getCognitiveSummary());
+                this.getCognitiveSummary(),
+                oreItems,
+                shelterReady);
     }
 
     void runtimeApplyGoalDirective(ServerPlayer speaker, AgentGoal goal, boolean pin) {
@@ -3880,4 +3953,5 @@ public class AIPlayerEntity extends Zombie {
     private record DeliveryRequest(String label, boolean deliverAll, int requestedCount, Predicate<ItemStack> matcher) {
     }
 }
+
 

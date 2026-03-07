@@ -98,16 +98,16 @@ public final class TeamKnowledge {
     }
 
     public static void reportStructure(AIPlayerEntity entity, String label, BlockPos pos) {
-        reportFailure(entity, "???" + label, pos);
+        reportFailure(entity, "\u7ed3\u6784\uff1a" + label, pos);
     }
 
     public static String getSummary(AIPlayerEntity entity) {
         UUID teamId = resolveTeamId(entity);
         if (teamId == null) {
-            return "??????";
+            return "\u6682\u65e0\u56e2\u961f\u77e5\u8bc6";
         }
         List<String> events = EVENT_MAP.get(teamId);
-        return events == null || events.isEmpty() ? "??????" : String.join(" | ", events);
+        return events == null || events.isEmpty() ? "\u6682\u65e0\u56e2\u961f\u77e5\u8bc6" : String.join(" | ", events);
     }
 
     private static UUID resolveTeamId(AIPlayerEntity entity) {
