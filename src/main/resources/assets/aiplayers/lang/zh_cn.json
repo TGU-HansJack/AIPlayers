@@ -1,0 +1,6 @@
+{
+  "entity.aiplayers.ai_player": "AI 玩家同伴",
+  "key.aiplayers.open_panel": "打开 AI 面板",
+  "key.aiplayers.voice": "AI 语音录音",
+  "key_categories.aiplayers.controls": "AI Players"
+}

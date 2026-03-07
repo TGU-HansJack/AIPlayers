@@ -1,0 +1,43 @@
+# IDEs and editors
+/.idea/
+/.vscode/
+/out/
+/bin/
+/.settings/
+/.metadata/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+*.launch
+
+# Gradle and build outputs
+/.gradle/
+/build/
+/run/
+/runs/
+/run-data/
+/repo/
+
+# Logs and crash dumps
+*.log
+hs_err_pid*
+replay_pid*
+crash-*.txt
+
+# Local Gradle downloads and extracted distributions
+/gradle-*-bin.zip
+/gradle-[0-9]*/
+
+# Temporary local scripts and scratch artifacts
+/.tmp-init.gradle
+*.class
+/Reflect.java
+/Reflect2.java
+/TmpGeneric.java
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
