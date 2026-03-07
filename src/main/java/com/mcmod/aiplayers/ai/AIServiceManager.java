@@ -23,6 +23,10 @@ import net.minecraft.server.level.ServerPlayer;
 public final class AIServiceManager {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Path CONFIG_PATH = Path.of("config", "aiplayers-api.json");
+    private static final String DEFAULT_PROVIDER = "qwen-compatible";
+    private static final String DEFAULT_CHAT_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+    private static final String DEFAULT_CHAT_MODEL = "qwen-plus";
+    private static final String LEGACY_OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
     private static volatile Config config = loadOrCreateConfig();
     private static volatile String lastStatus = "本地规则模式";
 
@@ -243,10 +247,14 @@ public final class AIServiceManager {
             String content = Files.readString(CONFIG_PATH, StandardCharsets.UTF_8);
             Config loaded = GSON.fromJson(content, Config.class);
             if (loaded == null) {
-                lastStatus = "配置解析失败，已回退默认值";
+                lastStatus = "?????????????";
                 return Config.createDefault();
             }
-            return loaded.normalize();
+            Config normalized = loaded.normalize();
+            if (!GSON.toJson(normalized).equals(content)) {
+                saveConfig(normalized);
+            }
+            return normalized;
         } catch (IOException ex) {
             lastStatus = "读取配置失败：" + ex.getMessage();
             return Config.createDefault();
@@ -273,20 +281,29 @@ public final class AIServiceManager {
         private static Config createDefault() {
             Config config = new Config();
             config.enabled = false;
-            config.provider = "openai-compatible";
-            config.url = "https://api.openai.com/v1/chat/completions";
+            config.provider = DEFAULT_PROVIDER;
+            config.url = DEFAULT_CHAT_URL;
             config.apiKey = "";
-            config.model = "";
-            config.timeoutMs = 4000;
+            config.model = DEFAULT_CHAT_MODEL;
+            config.timeoutMs = 8000;
             return config;
         }
 
         private Config normalize() {
-            if (this.provider == null || this.provider.isBlank()) {
-                this.provider = "openai-compatible";
+            if (this.provider == null || this.provider.isBlank() || "openai-compatible".equalsIgnoreCase(this.provider)) {
+                this.provider = DEFAULT_PROVIDER;
+            }
+            if (this.url == null || this.url.isBlank() || LEGACY_OPENAI_CHAT_URL.equalsIgnoreCase(this.url)) {
+                this.url = DEFAULT_CHAT_URL;
+            }
+            if (this.apiKey == null) {
+                this.apiKey = "";
+            }
+            if (this.model == null || this.model.isBlank()) {
+                this.model = DEFAULT_CHAT_MODEL;
             }
             if (this.timeoutMs <= 0) {
-                this.timeoutMs = 4000;
+                this.timeoutMs = 8000;
             }
             return this;
         }

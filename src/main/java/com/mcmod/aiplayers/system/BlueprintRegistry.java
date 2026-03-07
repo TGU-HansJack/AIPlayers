@@ -9,7 +9,7 @@ public final class BlueprintRegistry {
     private static final Map<String, BlueprintTemplate> TEMPLATES = new LinkedHashMap<>();
 
     static {
-        register(new BlueprintTemplate("shelter", "???", List.of(
+        register(new BlueprintTemplate("shelter", "\u907f\u96be\u6240", List.of(
                 place(-1, 0, -1), place(0, 0, -1), place(1, 0, -1),
                 place(-1, 1, -1), place(0, 1, -1), place(1, 1, -1),
                 place(-1, 0, 0), place(-1, 1, 0), place(1, 0, 0), place(1, 1, 0),
@@ -19,7 +19,7 @@ public final class BlueprintRegistry {
                 place(-1, 2, 1), place(0, 2, 1), place(1, 2, 1)
         )));
 
-        register(new BlueprintTemplate("cabin", "??", List.of(
+        register(new BlueprintTemplate("cabin", "\u5c0f\u5c4b", List.of(
                 place(-2, 0, -2), place(-1, 0, -2), place(0, 0, -2), place(1, 0, -2), place(2, 0, -2),
                 place(-2, 1, -2), place(-2, 2, -2), place(2, 1, -2), place(2, 2, -2),
                 place(-2, 0, -1), place(2, 0, -1), place(-2, 1, -1), place(2, 1, -1),
@@ -34,7 +34,7 @@ public final class BlueprintRegistry {
                 place(-2, 3, 2), place(-1, 3, 2), place(0, 3, 2), place(1, 3, 2), place(2, 3, 2)
         )));
 
-        register(new BlueprintTemplate("watchtower", "??", List.of(
+        register(new BlueprintTemplate("watchtower", "\u77ad\u671b\u5854", List.of(
                 place(-1, 0, -1), place(1, 0, -1), place(-1, 0, 1), place(1, 0, 1),
                 place(-1, 1, -1), place(1, 1, -1), place(-1, 1, 1), place(1, 1, 1),
                 place(-1, 2, -1), place(1, 2, -1), place(-1, 2, 1), place(1, 2, 1),

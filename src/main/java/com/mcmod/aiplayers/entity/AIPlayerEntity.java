@@ -198,7 +198,7 @@ public class AIPlayerEntity extends Zombie {
         if (normalizedMode != AIPlayerMode.BUILD_SHELTER) {
             this.shelterAnchor = null;
         }
-        this.remember("??", "??? " + normalizedMode.displayName());
+        this.remember("\u6a21\u5f0f", "\u5207\u6362\u4e3a " + normalizedMode.displayName());
         this.refreshDisplayName();
         this.markPersistentDirty();
     }
@@ -384,14 +384,14 @@ public class AIPlayerEntity extends Zombie {
         return "动作已接收。";
     }
     public String getStatusSummary() {
-        return "???" + this.safeModeDisplayName()
-                + "????" + Math.round(this.getHealth()) + "/" + Math.round(this.getMaxHealth())
-                + "????" + this.getUsedBackpackSlots() + "/" + BACKPACK_SIZE
-                + "????" + this.getInventoryPreview()
-                + "????" + this.getMemorySummary()
-                + "????" + this.getPlanSummary()
-                + "????" + this.getObservationSummary()
-                + (this.pendingAiResponse ? "?AI????" : "");
+        return "\u6a21\u5f0f\uff1a" + this.safeModeDisplayName()
+                + "\uff1b\u751f\u547d\uff1a" + Math.round(this.getHealth()) + "/" + Math.round(this.getMaxHealth())
+                + "\uff1b\u80cc\u5305\uff1a" + this.getUsedBackpackSlots() + "/" + BACKPACK_SIZE
+                + "\uff1b\u7269\u8d44\uff1a" + this.getInventoryPreview()
+                + "\uff1b\u8bb0\u5fc6\uff1a" + this.getMemorySummary()
+                + "\uff1b\u89c4\u5212\uff1a" + this.getPlanSummary()
+                + "\uff1b\u4fa6\u5bdf\uff1a" + this.getObservationSummary()
+                + (this.pendingAiResponse ? "\uff1bAI\uff1a\u601d\u8003\u4e2d" : "");
     }
 
 

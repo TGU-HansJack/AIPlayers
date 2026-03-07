@@ -38,7 +38,7 @@ public final class AILongTermMemoryStore {
         synchronized (getLock(path)) {
             StoreCache cache = loadCache(path);
             MemoryProfile profile = cache.profiles.computeIfAbsent(buildProfileKey(entity), unused -> new MemoryProfile());
-            profile.events.add(type + "?" + detail);
+            profile.events.add(type + "\uff1a" + detail);
             while (profile.events.size() > MAX_EVENTS) {
                 profile.events.remove(0);
             }
@@ -75,13 +75,13 @@ public final class AILongTermMemoryStore {
     public static String getSummary(AIPlayerEntity entity) {
         Path path = resolvePath(entity);
         if (path == null) {
-            return "??????";
+            return "\u6682\u65e0\u957f\u671f\u8bb0\u5fc6";
         }
 
         synchronized (getLock(path)) {
             MemoryProfile profile = loadCache(path).profiles.get(buildProfileKey(entity));
             if (profile == null) {
-                return "??????";
+                return "\u6682\u65e0\u957f\u671f\u8bb0\u5fc6";
             }
 
             List<String> parts = new ArrayList<>();
@@ -92,24 +92,24 @@ public final class AILongTermMemoryStore {
                         .findFirst()
                         .orElse(null);
                 if (topType != null) {
-                    parts.add("??=" + topType);
+                    parts.add("\u504f\u597d=" + topType);
                 }
             }
 
             String goal = profile.notes.get("goal");
             if (goal != null && !goal.isBlank()) {
-                parts.add("??=" + goal);
+                parts.add("\u76ee\u6807=" + goal);
             }
 
             String blueprint = profile.notes.get("blueprint");
             if (blueprint != null && !blueprint.isBlank()) {
-                parts.add("??=" + blueprint);
+                parts.add("\u84dd\u56fe=" + blueprint);
             }
 
             if (!profile.events.isEmpty()) {
-                parts.add("??=" + profile.events.get(profile.events.size() - 1));
+                parts.add("\u6700\u8fd1=" + profile.events.get(profile.events.size() - 1));
             }
-            return parts.isEmpty() ? "??????" : String.join("?", parts);
+            return parts.isEmpty() ? "\u6682\u65e0\u957f\u671f\u8bb0\u5fc6" : String.join("\uff1b", parts);
         }
     }
 

@@ -2,6 +2,8 @@ package com.mcmod.aiplayers.client.voice;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mcmod.aiplayers.AIPlayersMod;
@@ -16,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import javax.sound.sampled.AudioFileFormat;
@@ -32,9 +35,17 @@ import net.minecraft.network.chat.Component;
 public final class AIPlayersVoiceClient {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Path CONFIG_PATH = Path.of("config", "aiplayers-voice.json");
+    private static final String DEFAULT_STT_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+    private static final String DEFAULT_STT_MODEL = "qwen3-asr-flash";
+    private static final String DEFAULT_TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
+    private static final String DEFAULT_TTS_MODEL = "qwen-tts";
+    private static final String DEFAULT_TTS_VOICE = "Cherry";
+    private static final String LEGACY_OPENAI_STT_URL = "https://api.openai.com/v1/audio/transcriptions";
+    private static final String LEGACY_OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech";
+
     private static volatile VoiceConfig config = loadOrCreateConfig();
     private static volatile boolean recording;
-    private static volatile String lastStatus = "?????";
+    private static volatile String lastStatus = "\u5f85\u673a";
     private static volatile TargetDataLine activeLine;
     private static volatile ByteArrayOutputStream activeBuffer;
     private static volatile Thread recorderThread;
@@ -47,7 +58,7 @@ public final class AIPlayersVoiceClient {
     }
 
     public static String getStatusSummary() {
-        return "???" + (config.enabled ? "???" : "???") + "????" + lastStatus;
+        return "\u8bed\u97f3\uff1a" + (config.enabled ? "\u5df2\u542f\u7528" : "\u672a\u542f\u7528") + "\uff0c\u72b6\u6001\uff1a" + lastStatus;
     }
 
     public static boolean isRecording() {
@@ -56,7 +67,7 @@ public final class AIPlayersVoiceClient {
 
     public static void toggleRecording(String targetName) {
         if (!config.enabled) {
-            pushClientMessage("?????????? config/aiplayers-voice.json");
+            pushClientMessage("\u8bed\u97f3\u529f\u80fd\u672a\u542f\u7528\uff0c\u8bf7\u5148\u914d\u7f6e config/aiplayers-voice.json");
             return;
         }
         if (recording) {
@@ -94,10 +105,10 @@ public final class AIPlayersVoiceClient {
             recorderThread = new Thread(() -> captureLoop(line, buffer), "AIPlayers-VoiceRecorder");
             recorderThread.setDaemon(true);
             recorderThread.start();
-            lastStatus = "???";
-            pushClientMessage("???????????????????" );
+            lastStatus = "\u5f55\u97f3\u4e2d";
+            pushClientMessage("\u5df2\u5f00\u59cb\u5f55\u97f3\uff0c\u518d\u6309\u4e00\u6b21\u6309\u94ae\u7ed3\u675f\u5e76\u53d1\u9001\u3002");
         } catch (LineUnavailableException ex) {
-            lastStatus = "???????" + ex.getMessage();
+            lastStatus = "\u65e0\u6cd5\u5f55\u97f3\uff1a" + ex.getMessage();
             AIPlayersMod.LOGGER.warn("Unable to start microphone capture", ex);
             pushClientMessage(lastStatus);
         }
@@ -128,17 +139,17 @@ public final class AIPlayersVoiceClient {
             line.close();
         }
         if (buffer == null || buffer.size() == 0) {
-            lastStatus = "????";
+            lastStatus = "\u6ca1\u6709\u5f55\u5230\u58f0\u97f3";
             pushClientMessage(lastStatus);
             return;
         }
 
         byte[] wav = encodeWav(buffer.toByteArray());
-        lastStatus = "???";
-        pushClientMessage("?????...");
+        lastStatus = "\u8bc6\u522b\u4e2d";
+        pushClientMessage("\u6b63\u5728\u8bc6\u522b\u8bed\u97f3...");
         transcribeAsync(wav).thenAccept(transcript -> {
             if (transcript == null || transcript.isBlank()) {
-                pushClientMessage("?????????? STT ??????");
+                pushClientMessage("\u8bed\u97f3\u8bc6\u522b\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5 STT \u914d\u7f6e\u6216\u7f51\u7edc\u3002");
                 return;
             }
             Minecraft minecraft = Minecraft.getInstance();
@@ -147,7 +158,7 @@ public final class AIPlayersVoiceClient {
             minecraft.execute(() -> {
                 if (minecraft.getConnection() != null) {
                     minecraft.getConnection().sendChat(chatLine);
-                    pushClientMessage("????????" + transcript.trim());
+                    pushClientMessage("\u5df2\u53d1\u9001\u8bed\u97f3\u547d\u4ee4\uff1a" + transcript.trim());
                 }
             });
         });
@@ -170,37 +181,84 @@ public final class AIPlayersVoiceClient {
         if (config.sttUrl == null || config.sttUrl.isBlank() || config.sttModel == null || config.sttModel.isBlank()) {
             return CompletableFuture.completedFuture(null);
         }
+        if (usesQwenAsr()) {
+            return transcribeWithQwenAsync(wavBytes);
+        }
+        return transcribeWithLegacyMultipartAsync(wavBytes);
+    }
 
-        String boundary = "----AIPlayersBoundary" + UUID.randomUUID();
-        byte[] multipart = buildMultipart(boundary, wavBytes);
-        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(config.sttUrl))
-                .timeout(Duration.ofMillis(Math.max(2000, config.timeoutMs)))
-                .header("Content-Type", "multipart/form-data; boundary=" + boundary)
-                .POST(HttpRequest.BodyPublishers.ofByteArray(multipart));
-        if (config.sttApiKey != null && !config.sttApiKey.isBlank()) {
-            builder.header("Authorization", "Bearer " + config.sttApiKey);
+    private static CompletableFuture<String> transcribeWithQwenAsync(byte[] wavBytes) {
+        JsonObject root = new JsonObject();
+        root.addProperty("model", config.sttModel);
+        root.addProperty("stream", false);
+
+        JsonObject user = new JsonObject();
+        user.addProperty("role", "user");
+
+        JsonArray content = new JsonArray();
+        JsonObject audioPart = new JsonObject();
+        audioPart.addProperty("type", "input_audio");
+        JsonObject audioInput = new JsonObject();
+        audioInput.addProperty("data", "data:audio/wav;base64," + Base64.getEncoder().encodeToString(wavBytes));
+        audioPart.add("input_audio", audioInput);
+        content.add(audioPart);
+
+        user.add("content", content);
+        JsonArray messages = new JsonArray();
+        messages.add(user);
+        root.add("messages", messages);
+
+        if (config.sttLanguage != null && !config.sttLanguage.isBlank()) {
+            JsonObject asrOptions = new JsonObject();
+            asrOptions.addProperty("language", config.sttLanguage);
+            root.add("asr_options", asrOptions);
         }
 
-        return HttpClient.newBuilder()
-                .connectTimeout(Duration.ofMillis(Math.max(2000, config.timeoutMs)))
-                .build()
+        HttpRequest.Builder builder = createAuthorizedRequestBuilder(config.sttUrl, config.timeoutMs, config.sttApiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(root), StandardCharsets.UTF_8));
+
+        return createHttpClient(config.timeoutMs)
                 .sendAsync(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
                 .handle((response, throwable) -> {
                     if (throwable != null || response == null || response.statusCode() < 200 || response.statusCode() >= 300) {
                         lastStatus = throwable != null ? throwable.getClass().getSimpleName() : "STT HTTP " + (response == null ? "null" : response.statusCode());
-                        AIPlayersMod.LOGGER.warn("Transcription failed: {}", lastStatus);
+                        if (throwable != null) {
+                            AIPlayersMod.LOGGER.warn("Qwen transcription failed: {}", lastStatus, throwable);
+                        } else {
+                            AIPlayersMod.LOGGER.warn("Qwen transcription failed: {}, body={}", lastStatus, summarizeResponseBody(response.body()));
+                        }
                         return null;
                     }
                     return parseTranscript(response.body());
                 });
     }
 
-    private static byte[] buildMultipart(String boundary, byte[] wavBytes) {
+    private static CompletableFuture<String> transcribeWithLegacyMultipartAsync(byte[] wavBytes) {
+        String boundary = "----AIPlayersBoundary" + UUID.randomUUID();
+        byte[] multipart = buildLegacyMultipart(boundary, wavBytes);
+        HttpRequest.Builder builder = createAuthorizedRequestBuilder(config.sttUrl, config.timeoutMs, config.sttApiKey)
+                .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                .POST(HttpRequest.BodyPublishers.ofByteArray(multipart));
+
+        return createHttpClient(config.timeoutMs)
+                .sendAsync(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+                .handle((response, throwable) -> {
+                    if (throwable != null || response == null || response.statusCode() < 200 || response.statusCode() >= 300) {
+                        lastStatus = throwable != null ? throwable.getClass().getSimpleName() : "STT HTTP " + (response == null ? "null" : response.statusCode());
+                        AIPlayersMod.LOGGER.warn("Legacy transcription failed: {}", lastStatus);
+                        return null;
+                    }
+                    return parseTranscript(response.body());
+                });
+    }
+
+    private static byte[] buildLegacyMultipart(String boundary, byte[] wavBytes) {
         try {
             ByteArrayOutputStream output = new ByteArrayOutputStream();
-            writeField(output, boundary, "model", config.sttModel);
+            writeLegacyField(output, boundary, "model", config.sttModel);
             if (config.sttLanguage != null && !config.sttLanguage.isBlank()) {
-                writeField(output, boundary, "language", config.sttLanguage);
+                writeLegacyField(output, boundary, "language", config.sttLanguage);
             }
             output.write(("--" + boundary + "\r\n").getBytes(StandardCharsets.UTF_8));
             output.write("Content-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"\r\n".getBytes(StandardCharsets.UTF_8));
@@ -215,23 +273,73 @@ public final class AIPlayersVoiceClient {
         }
     }
 
-    private static void writeField(ByteArrayOutputStream output, String boundary, String name, String value) throws IOException {
+    private static void writeLegacyField(ByteArrayOutputStream output, String boundary, String name, String value) throws IOException {
         output.write(("--" + boundary + "\r\n").getBytes(StandardCharsets.UTF_8));
         output.write(("Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n").getBytes(StandardCharsets.UTF_8));
         output.write(value.getBytes(StandardCharsets.UTF_8));
         output.write("\r\n".getBytes(StandardCharsets.UTF_8));
     }
 
+    private static String summarizeResponseBody(String body) {
+        if (body == null) {
+            return "<null>";
+        }
+        String normalized = body.replace('\r', ' ').replace('\n', ' ').trim();
+        if (normalized.length() <= 240) {
+            return normalized;
+        }
+        return normalized.substring(0, 240) + "...";
+    }
+
     private static String parseTranscript(String body) {
         try {
             JsonObject root = JsonParser.parseString(body).getAsJsonObject();
             if (root.has("text")) {
-                lastStatus = "????";
+                lastStatus = "\u8bc6\u522b\u5b8c\u6210";
                 return root.get("text").getAsString();
+            }
+            JsonArray choices = root.getAsJsonArray("choices");
+            if (choices != null && !choices.isEmpty()) {
+                JsonObject choice = choices.get(0).getAsJsonObject();
+                JsonObject message = choice.getAsJsonObject("message");
+                if (message != null) {
+                    JsonElement content = message.get("content");
+                    String transcript = flattenMessageContent(content);
+                    if (transcript != null && !transcript.isBlank()) {
+                        lastStatus = "\u8bc6\u522b\u5b8c\u6210";
+                        return transcript.trim();
+                    }
+                }
             }
         } catch (RuntimeException ignored) {
         }
-        lastStatus = "STT ??????";
+        lastStatus = "STT \u8fd4\u56de\u65e0\u6587\u672c";
+        return null;
+    }
+
+    private static String flattenMessageContent(JsonElement content) {
+        if (content == null || content.isJsonNull()) {
+            return null;
+        }
+        if (content.isJsonPrimitive()) {
+            return content.getAsString();
+        }
+        if (content.isJsonArray()) {
+            StringBuilder builder = new StringBuilder();
+            for (JsonElement element : content.getAsJsonArray()) {
+                if (!element.isJsonObject()) {
+                    continue;
+                }
+                JsonObject part = element.getAsJsonObject();
+                if (part.has("text") && !part.get("text").isJsonNull()) {
+                    if (!builder.isEmpty()) {
+                        builder.append(' ');
+                    }
+                    builder.append(part.get("text").getAsString());
+                }
+            }
+            return builder.isEmpty() ? null : builder.toString();
+        }
         return null;
     }
 
@@ -239,24 +347,71 @@ public final class AIPlayersVoiceClient {
         if (config.ttsUrl == null || config.ttsUrl.isBlank() || config.ttsModel == null || config.ttsModel.isBlank()) {
             return;
         }
+        if (usesQwenTts()) {
+            synthesizeWithQwenAsync(text);
+        } else {
+            synthesizeWithLegacyOpenAiAsync(text);
+        }
+    }
 
+    private static void synthesizeWithQwenAsync(String text) {
+        JsonObject root = new JsonObject();
+        root.addProperty("model", config.ttsModel);
+
+        JsonObject input = new JsonObject();
+        input.addProperty("text", text);
+        root.add("input", input);
+
+        JsonObject parameters = new JsonObject();
+        parameters.addProperty("voice", config.ttsVoice);
+        parameters.addProperty("format", "wav");
+        root.add("parameters", parameters);
+
+        HttpRequest.Builder builder = createAuthorizedRequestBuilder(config.ttsUrl, config.timeoutMs, config.ttsApiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(root), StandardCharsets.UTF_8));
+
+        createHttpClient(config.timeoutMs)
+                .sendAsync(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+                .thenCompose(response -> {
+                    if (response == null || response.statusCode() < 200 || response.statusCode() >= 300) {
+                        AIPlayersMod.LOGGER.warn("Qwen voice synthesis failed: HTTP {}", response == null ? "null" : response.statusCode());
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    byte[] directAudio = extractQwenAudioBytes(response.body());
+                    if (directAudio != null) {
+                        return CompletableFuture.completedFuture(directAudio);
+                    }
+                    String audioUrl = extractQwenAudioUrl(response.body());
+                    if (audioUrl == null || audioUrl.isBlank()) {
+                        AIPlayersMod.LOGGER.warn("Qwen voice synthesis returned no audio url/body");
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    return downloadAudio(audioUrl, config.timeoutMs);
+                })
+                .thenAccept(audioBytes -> {
+                    if (audioBytes != null && audioBytes.length > 0) {
+                        playWav(audioBytes);
+                    }
+                })
+                .exceptionally(throwable -> {
+                    AIPlayersMod.LOGGER.warn("Voice synthesis failed", throwable);
+                    return null;
+                });
+    }
+
+    private static void synthesizeWithLegacyOpenAiAsync(String text) {
         JsonObject root = new JsonObject();
         root.addProperty("model", config.ttsModel);
         root.addProperty("voice", config.ttsVoice);
         root.addProperty("response_format", "wav");
         root.addProperty("input", text);
 
-        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(config.ttsUrl))
-                .timeout(Duration.ofMillis(Math.max(2000, config.timeoutMs)))
+        HttpRequest.Builder builder = createAuthorizedRequestBuilder(config.ttsUrl, config.timeoutMs, config.ttsApiKey)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(root), StandardCharsets.UTF_8));
-        if (config.ttsApiKey != null && !config.ttsApiKey.isBlank()) {
-            builder.header("Authorization", "Bearer " + config.ttsApiKey);
-        }
 
-        HttpClient.newBuilder()
-                .connectTimeout(Duration.ofMillis(Math.max(2000, config.timeoutMs)))
-                .build()
+        createHttpClient(config.timeoutMs)
                 .sendAsync(builder.build(), HttpResponse.BodyHandlers.ofByteArray())
                 .thenAccept(response -> {
                     if (response == null || response.statusCode() < 200 || response.statusCode() >= 300) {
@@ -270,6 +425,60 @@ public final class AIPlayersVoiceClient {
                 });
     }
 
+    private static byte[] extractQwenAudioBytes(String body) {
+        try {
+            JsonObject root = JsonParser.parseString(body).getAsJsonObject();
+            JsonObject output = root.getAsJsonObject("output");
+            if (output == null) {
+                return null;
+            }
+            JsonObject audio = output.getAsJsonObject("audio");
+            if (audio == null) {
+                return null;
+            }
+            JsonElement data = audio.get("data");
+            if (data == null || data.isJsonNull()) {
+                return null;
+            }
+            return Base64.getDecoder().decode(data.getAsString());
+        } catch (RuntimeException ex) {
+            return null;
+        }
+    }
+
+    private static String extractQwenAudioUrl(String body) {
+        try {
+            JsonObject root = JsonParser.parseString(body).getAsJsonObject();
+            JsonObject output = root.getAsJsonObject("output");
+            if (output == null) {
+                return null;
+            }
+            JsonObject audio = output.getAsJsonObject("audio");
+            if (audio == null) {
+                return null;
+            }
+            JsonElement url = audio.get("url");
+            return url == null || url.isJsonNull() ? null : url.getAsString();
+        } catch (RuntimeException ex) {
+            return null;
+        }
+    }
+
+    private static CompletableFuture<byte[]> downloadAudio(String url, int timeoutMs) {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                .timeout(Duration.ofMillis(Math.max(2000, timeoutMs)))
+                .GET()
+                .build();
+        return createHttpClient(timeoutMs)
+                .sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
+                .handle((response, throwable) -> {
+                    if (throwable != null || response == null || response.statusCode() < 200 || response.statusCode() >= 300) {
+                        return null;
+                    }
+                    return response.body();
+                });
+    }
+
     private static void playWav(byte[] audioBytes) {
         try (AudioInputStream audio = AudioSystem.getAudioInputStream(new ByteArrayInputStream(audioBytes))) {
             Clip clip = AudioSystem.getClip();
@@ -278,6 +487,36 @@ public final class AIPlayersVoiceClient {
         } catch (Exception ex) {
             AIPlayersMod.LOGGER.warn("Unable to play synthesized voice", ex);
         }
+    }
+
+    private static boolean usesQwenAsr() {
+        return config.sttUrl != null
+                && config.sttUrl.contains("dashscope.aliyuncs.com")
+                && config.sttUrl.contains("compatible-mode")
+                && config.sttModel != null
+                && config.sttModel.startsWith("qwen");
+    }
+
+    private static boolean usesQwenTts() {
+        return config.ttsUrl != null
+                && config.ttsUrl.contains("dashscope.aliyuncs.com")
+                && config.ttsModel != null
+                && config.ttsModel.startsWith("qwen");
+    }
+
+    private static HttpClient createHttpClient(int timeoutMs) {
+        return HttpClient.newBuilder()
+                .connectTimeout(Duration.ofMillis(Math.max(2000, timeoutMs)))
+                .build();
+    }
+
+    private static HttpRequest.Builder createAuthorizedRequestBuilder(String url, int timeoutMs, String apiKey) {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url))
+                .timeout(Duration.ofMillis(Math.max(2000, timeoutMs)));
+        if (apiKey != null && !apiKey.isBlank()) {
+            builder.header("Authorization", "Bearer " + apiKey);
+        }
+        return builder;
     }
 
     private static void pushClientMessage(String message) {
@@ -294,14 +533,31 @@ public final class AIPlayersVoiceClient {
             Files.createDirectories(CONFIG_PATH.getParent());
             if (!Files.exists(CONFIG_PATH)) {
                 VoiceConfig template = VoiceConfig.createDefault();
-                Files.writeString(CONFIG_PATH, GSON.toJson(template), StandardCharsets.UTF_8);
+                saveConfig(template);
                 return template;
             }
-            VoiceConfig loaded = GSON.fromJson(Files.readString(CONFIG_PATH, StandardCharsets.UTF_8), VoiceConfig.class);
-            return loaded == null ? VoiceConfig.createDefault() : loaded.normalize();
+            String content = Files.readString(CONFIG_PATH, StandardCharsets.UTF_8);
+            VoiceConfig loaded = GSON.fromJson(content, VoiceConfig.class);
+            if (loaded == null) {
+                return VoiceConfig.createDefault();
+            }
+            VoiceConfig normalized = loaded.normalize();
+            if (!GSON.toJson(normalized).equals(content)) {
+                saveConfig(normalized);
+            }
+            return normalized;
         } catch (IOException ex) {
             AIPlayersMod.LOGGER.warn("Failed to load voice config", ex);
             return VoiceConfig.createDefault();
+        }
+    }
+
+    private static void saveConfig(VoiceConfig value) {
+        try {
+            Files.createDirectories(CONFIG_PATH.getParent());
+            Files.writeString(CONFIG_PATH, GSON.toJson(value.normalize()), StandardCharsets.UTF_8);
+        } catch (IOException ex) {
+            AIPlayersMod.LOGGER.warn("Failed to save voice config", ex);
         }
     }
 
@@ -324,15 +580,15 @@ public final class AIPlayersVoiceClient {
             config.enabled = false;
             config.autoSpeakReplies = false;
             config.defaultTarget = "ai";
-            config.sttUrl = "https://api.openai.com/v1/audio/transcriptions";
+            config.sttUrl = DEFAULT_STT_URL;
             config.sttApiKey = "";
-            config.sttModel = "";
+            config.sttModel = DEFAULT_STT_MODEL;
             config.sttLanguage = "zh";
-            config.ttsUrl = "https://api.openai.com/v1/audio/speech";
+            config.ttsUrl = DEFAULT_TTS_URL;
             config.ttsApiKey = "";
-            config.ttsModel = "";
-            config.ttsVoice = "alloy";
-            config.timeoutMs = 12000;
+            config.ttsModel = DEFAULT_TTS_MODEL;
+            config.ttsVoice = DEFAULT_TTS_VOICE;
+            config.timeoutMs = 15000;
             return config;
         }
 
@@ -340,11 +596,32 @@ public final class AIPlayersVoiceClient {
             if (this.defaultTarget == null || this.defaultTarget.isBlank()) {
                 this.defaultTarget = "ai";
             }
-            if (this.ttsVoice == null || this.ttsVoice.isBlank()) {
-                this.ttsVoice = "alloy";
+            if (this.sttUrl == null || this.sttUrl.isBlank() || LEGACY_OPENAI_STT_URL.equalsIgnoreCase(this.sttUrl)) {
+                this.sttUrl = DEFAULT_STT_URL;
+            }
+            if (this.sttApiKey == null) {
+                this.sttApiKey = "";
+            }
+            if (this.sttModel == null || this.sttModel.isBlank()) {
+                this.sttModel = DEFAULT_STT_MODEL;
+            }
+            if (this.sttLanguage == null || this.sttLanguage.isBlank()) {
+                this.sttLanguage = "zh";
+            }
+            if (this.ttsUrl == null || this.ttsUrl.isBlank() || LEGACY_OPENAI_TTS_URL.equalsIgnoreCase(this.ttsUrl)) {
+                this.ttsUrl = DEFAULT_TTS_URL;
+            }
+            if (this.ttsApiKey == null) {
+                this.ttsApiKey = "";
+            }
+            if (this.ttsModel == null || this.ttsModel.isBlank()) {
+                this.ttsModel = DEFAULT_TTS_MODEL;
+            }
+            if (this.ttsVoice == null || this.ttsVoice.isBlank() || "alloy".equalsIgnoreCase(this.ttsVoice)) {
+                this.ttsVoice = DEFAULT_TTS_VOICE;
             }
             if (this.timeoutMs <= 0) {
-                this.timeoutMs = 12000;
+                this.timeoutMs = 15000;
             }
             return this;
         }

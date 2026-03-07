@@ -22,7 +22,7 @@ public class AIPlayersControlScreen extends Screen {
     private int refreshTicks;
 
     public AIPlayersControlScreen() {
-        super(Component.literal("AI Players ????"));
+        super(Component.literal("AI Players \u63a7\u5236\u9762\u677f"));
     }
 
     @Override
@@ -55,10 +55,10 @@ public class AIPlayersControlScreen extends Screen {
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         super.render(graphics, mouseX, mouseY, partialTick);
         graphics.drawString(this.font, this.title, 12, 12, 0xFFFFFF);
-        graphics.drawString(this.font, "?? AI?" + this.nearby.size(), 12, 28, 0xC0C0C0);
-        graphics.drawString(this.font, "?????" + this.getSelectedName(), 220, 28, 0xC0C0C0);
+        graphics.drawString(this.font, "\u9644\u8fd1 AI\uff1a" + this.nearby.size(), 12, 28, 0xC0C0C0);
+        graphics.drawString(this.font, "\u5f53\u524d\u76ee\u6807\uff1a" + this.getSelectedName(), 220, 28, 0xC0C0C0);
         graphics.drawString(this.font, AIPlayersVoiceClient.getStatusSummary(), 220, 44, 0x88D8FF);
-        graphics.drawString(this.font, "?????? AI?????????/??????????????", 12, this.height - 18, 0x909090);
+        graphics.drawString(this.font, "\u63d0\u793a\uff1a\u53ef\u76f4\u63a5\u4e0e AI \u5bf9\u8bdd\uff0c\u4e5f\u53ef\u7528\u5feb\u6377\u6309\u94ae\u53d1\u9001\u547d\u4ee4\u3002", 12, this.height - 18, 0x909090);
     }
 
     private void rebuildPanel() {
@@ -84,26 +84,26 @@ public class AIPlayersControlScreen extends Screen {
 
         int gridX = 220;
         int gridY = 72;
-        this.addActionButton(gridX, gridY, "??", () -> this.sendTargetMessage("??"));
-        this.addActionButton(gridX + 110, gridY, "??", () -> this.sendTargetMessage("??"));
-        this.addActionButton(gridX, gridY + 24, "??", () -> this.sendTargetMessage("??"));
-        this.addActionButton(gridX + 110, gridY + 24, "??", () -> this.sendTargetMessage("??"));
-        this.addActionButton(gridX, gridY + 48, "??", () -> this.sendTargetMessage("??"));
-        this.addActionButton(gridX + 110, gridY + 48, "??", () -> this.sendTargetMessage("??"));
-        this.addActionButton(gridX, gridY + 72, "???", () -> this.sendTargetMessage("?????"));
-        this.addActionButton(gridX + 110, gridY + 72, "??", () -> this.sendTargetMessage("????"));
-        this.addActionButton(gridX, gridY + 96, "??", () -> this.sendTargetMessage("????"));
-        this.addActionButton(gridX + 110, gridY + 96, "??", () -> this.sendTargetMessage("??"));
-        this.addActionButton(gridX, gridY + 120, "??", () -> this.sendTargetMessage("??"));
-        this.addActionButton(gridX + 110, gridY + 120, "??", () -> this.sendTargetMessage("??"));
-        this.addActionButton(gridX, gridY + 144, AIPlayersVoiceClient.isRecording() ? "????" : "????", () -> AIPlayersVoiceClient.toggleRecording(this.getSelectedName()));
-        this.addActionButton(gridX + 110, gridY + 144, "??", this::refreshNearbyAndRebuild);
+        this.addActionButton(gridX, gridY, "\u8ddf\u968f", () -> this.sendTargetMessage("\u8ddf\u968f"));
+        this.addActionButton(gridX + 110, gridY, "\u62a4\u536b", () -> this.sendTargetMessage("\u62a4\u536b"));
+        this.addActionButton(gridX, gridY + 24, "\u780d\u6811", () -> this.sendTargetMessage("\u780d\u6811"));
+        this.addActionButton(gridX + 110, gridY + 24, "\u6316\u77ff", () -> this.sendTargetMessage("\u6316\u77ff"));
+        this.addActionButton(gridX, gridY + 48, "\u63a2\u7d22", () -> this.sendTargetMessage("\u63a2\u7d22"));
+        this.addActionButton(gridX + 110, gridY + 48, "\u5efa\u9020", () -> this.sendTargetMessage("\u5efa\u9020"));
+        this.addActionButton(gridX, gridY + 72, "\u907f\u96be\u6240", () -> this.sendTargetMessage("\u5efa\u9020\u907f\u96be\u6240"));
+        this.addActionButton(gridX + 110, gridY + 72, "\u751f\u5b58", () -> this.sendTargetMessage("\u751f\u5b58"));
+        this.addActionButton(gridX, gridY + 96, "\u8df3\u8dc3", () -> this.sendTargetMessage("\u8df3\u4e00\u4e0b"));
+        this.addActionButton(gridX + 110, gridY + 96, "\u8e72\u4e0b", () -> this.sendTargetMessage("\u8e72\u4e0b"));
+        this.addActionButton(gridX, gridY + 120, "\u62ac\u5934", () -> this.sendTargetMessage("\u62ac\u5934"));
+        this.addActionButton(gridX + 110, gridY + 120, "\u4f4e\u5934", () -> this.sendTargetMessage("\u4f4e\u5934"));
+        this.addActionButton(gridX, gridY + 144, AIPlayersVoiceClient.isRecording() ? "\u505c\u6b62\u5f55\u97f3" : "\u5f00\u59cb\u5f55\u97f3", () -> AIPlayersVoiceClient.toggleRecording(this.getSelectedName()));
+        this.addActionButton(gridX + 110, gridY + 144, "\u5237\u65b0", this::refreshNearbyAndRebuild);
 
-        this.commandBox = this.addRenderableWidget(new EditBox(this.font, 12, this.height - 42, this.width - 96, 20, Component.literal("?????")));
+        this.commandBox = this.addRenderableWidget(new EditBox(this.font, 12, this.height - 42, this.width - 96, 20, Component.literal("\u8f93\u5165\u547d\u4ee4")));
         this.commandBox.setMaxLength(160);
-        this.commandBox.setHint(Component.literal("????????? / ?? / ???"));
+        this.commandBox.setHint(Component.literal("\u4f8b\u5982\uff1a\u8ddf\u968f\u6211 / \u780d\u6811 / \u5efa\u9020\u907f\u96be\u6240"));
         this.commandBox.setValue("");
-        this.addRenderableWidget(Button.builder(Component.literal("??"), ignored -> this.sendCustomMessage())
+        this.addRenderableWidget(Button.builder(Component.literal("\u53d1\u9001"), ignored -> this.sendCustomMessage())
                 .bounds(this.width - 76, this.height - 42, 64, 20)
                 .build());
     }
