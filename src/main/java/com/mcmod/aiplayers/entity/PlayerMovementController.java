@@ -376,14 +376,14 @@ final class PlayerMovementController {
         float strafe = Mth.clamp(-Mth.sin(radians), -0.55F, 0.55F);
         float absYawDelta = Math.abs(yawDelta);
         if (absYawDelta > 135.0F) {
-            forward = 0.42F;
-            strafe = yawDelta > 0.0F ? -0.35F : 0.35F;
+            forward = 0.28F;
+            strafe = 0.0F;
         } else if (absYawDelta > 95.0F) {
-            forward = Math.max(0.55F, forward * 0.80F);
-            strafe = Mth.clamp(strafe, -0.18F, 0.18F);
+            forward = Math.max(0.44F, forward * 0.72F);
+            strafe = 0.0F;
         } else if (absYawDelta > 60.0F) {
-            forward = Math.max(0.68F, forward * 0.90F);
-            strafe *= 0.20F;
+            forward = Math.max(0.62F, forward * 0.88F);
+            strafe *= 0.12F;
         } else if (absYawDelta > 35.0F) {
             forward = Math.max(0.78F, forward);
             strafe *= 0.25F;

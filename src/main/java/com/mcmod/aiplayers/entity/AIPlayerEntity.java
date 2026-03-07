@@ -54,6 +54,7 @@ import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.entity.monster.zombie.Zombie;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.projectile.Projectile;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
@@ -112,7 +113,7 @@ public class AIPlayerEntity extends Zombie {
     private static final double FAST_FOLLOW_DISTANCE_SQR = 12.0D * 12.0D;
     private static final double TELEPORT_FOLLOW_DISTANCE_SQR = 32.0D * 32.0D;
     private static final int ALERT_COOLDOWN_TICKS = 120;
-    private static final float WASD_MAX_YAW_STEP = 24.0F;
+    private static final float WASD_MAX_YAW_STEP = 36.0F;
 
     private final NonNullList<ItemStack> backpack = NonNullList.withSize(BACKPACK_SIZE, ItemStack.EMPTY);
     private final List<String> memory = new ArrayList<>();
@@ -137,6 +138,7 @@ public class AIPlayerEntity extends Zombie {
     private int lookTicks;
     private Vec3 forcedLookTarget;
     private int jumpCooldown;
+    private int shieldGuardTicks;
     private boolean pendingAiResponse;
     private boolean persistentStateLoaded;
     private boolean persistentStateDirty;
@@ -1001,6 +1003,16 @@ public class AIPlayerEntity extends Zombie {
             if (this.lookTicks <= 0) {
                 this.forcedLookTarget = null;
             }
+        }
+        if (this.shieldGuardTicks > 0) {
+            this.shieldGuardTicks--;
+        }
+        if (this.shieldGuardTicks > 0 && this.getOffhandItem().getItem() == Items.SHIELD) {
+            if (!this.isUsingItem() || this.getUsedItemHand() != InteractionHand.OFF_HAND) {
+                this.startUsingItem(InteractionHand.OFF_HAND);
+            }
+        } else if (this.isUsingItem() && this.getUsedItemHand() == InteractionHand.OFF_HAND) {
+            this.stopUsingItem();
         }
 
         boolean shouldCrouch = this.crouchTicks > 0 || this.shouldAutoCrouch();
@@ -2777,7 +2789,13 @@ public class AIPlayerEntity extends Zombie {
         double dz = center.z - eyes.z;
         double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
         double horizontal = Math.sqrt(dx * dx + dz * dz);
-        return distance <= HARVEST_REACH && horizontal <= 2.75D;
+        if (distance > HARVEST_REACH || horizontal > 3.4D || Math.abs(dy) > 3.2D) {
+            return false;
+        }
+        BlockHitResult hitResult = this.level().clip(new ClipContext(eyes, center, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, this));
+        return hitResult.getType() != HitResult.Type.BLOCK
+                || hitResult.getBlockPos().equals(target)
+                || hitResult.getBlockPos().closerThan(target, 1.0D);
     }
 
     private boolean shouldJumpToward(BlockPos target) {
@@ -2959,6 +2977,7 @@ public class AIPlayerEntity extends Zombie {
             return false;
         }
 
+        this.facePosition(Vec3.atCenterOf(pos));
         this.swing(InteractionHand.MAIN_HAND);
         serverLevel.setBlock(pos, Blocks.OAK_PLANKS.defaultBlockState(), 3);
         WorldScanner.invalidateAt(serverLevel, pos);
@@ -3174,6 +3193,7 @@ public class AIPlayerEntity extends Zombie {
         this.setYHeadRot(yaw);
         this.setYBodyRot(yaw);
         this.setXRot(pitch);
+        this.setForcedLookTarget(target, 6);
     }
 
     private CompoundTag createRespawnSnapshot() {
@@ -3833,6 +3853,67 @@ public class AIPlayerEntity extends Zombie {
         if (this.observedHostile != null && this.observedHostile.isAlive()) {
             this.setTarget(this.observedHostile);
         }
+        this.tickSelfDefense();
+    }
+
+    private void tickSelfDefense() {
+        LivingEntity threat = this.observedHostile != null && this.observedHostile.isAlive() ? this.observedHostile : this.getTarget();
+        boolean closeThreat = threat != null && threat.isAlive() && this.distanceToSqr(threat) <= 64.0D;
+        boolean arrowThreat = this.hasIncomingArrowThreat(9.0D);
+        boolean shouldGuard = closeThreat || arrowThreat;
+        if (!shouldGuard) {
+            if (this.shieldGuardTicks <= 0 && this.isUsingItem() && this.getUsedItemHand() == InteractionHand.OFF_HAND) {
+                this.stopUsingItem();
+            }
+            return;
+        }
+
+        this.ensureShieldInOffhand();
+        if (threat != null && threat.isAlive()) {
+            this.setTarget(threat);
+            this.setForcedLookTarget(threat.getEyePosition(), 8);
+        }
+        this.shieldGuardTicks = Math.max(this.shieldGuardTicks, arrowThreat ? 18 : 10);
+        if (this.getOffhandItem().getItem() == Items.SHIELD) {
+            if (!this.isUsingItem() || this.getUsedItemHand() != InteractionHand.OFF_HAND) {
+                this.startUsingItem(InteractionHand.OFF_HAND);
+            }
+        }
+    }
+
+    private void ensureShieldInOffhand() {
+        if (this.getOffhandItem().getItem() == Items.SHIELD) {
+            return;
+        }
+        if (this.countBackpackItem(Items.SHIELD) > 0 || this.getOffhandItem().isEmpty()) {
+            this.setItemSlot(EquipmentSlot.OFFHAND, new ItemStack(Items.SHIELD));
+        }
+    }
+
+    private boolean hasIncomingArrowThreat(double radius) {
+        List<Projectile> projectiles = this.level().getEntitiesOfClass(
+                Projectile.class,
+                this.getBoundingBox().inflate(radius, 3.0D, radius),
+                projectile -> projectile != null && projectile.isAlive() && projectile.getOwner() != this);
+        if (projectiles.isEmpty()) {
+            return false;
+        }
+        Vec3 eye = this.getEyePosition();
+        for (Projectile projectile : projectiles) {
+            Vec3 velocity = projectile.getDeltaMovement();
+            if (velocity.lengthSqr() < 1.0E-4D) {
+                continue;
+            }
+            Vec3 toSelf = eye.subtract(projectile.position());
+            if (toSelf.lengthSqr() > radius * radius) {
+                continue;
+            }
+            double alignment = velocity.normalize().dot(toSelf.normalize());
+            if (alignment > 0.62D) {
+                return true;
+            }
+        }
+        return false;
     }
 
     WorldStateSnapshot captureWorldStateSnapshot() {
@@ -3935,6 +4016,13 @@ public class AIPlayerEntity extends Zombie {
     }
 
     boolean runtimeNavigateToPosition(BlockPos pos, double speed) {
+        if (pos == null) {
+            return false;
+        }
+        BlockPos resolved = this.runtimeResolveMovementTarget(pos);
+        if (resolved != null && this.navigateToPosition(resolved, speed)) {
+            return true;
+        }
         return this.navigateToPosition(pos, speed);
     }
 
@@ -4005,6 +4093,51 @@ public class AIPlayerEntity extends Zombie {
         }
         this.scanSurroundings();
         return true;
+    }
+
+    boolean runtimePrepareHarvestTool(boolean woodTask) {
+        ItemStack preferred = woodTask
+                ? this.findBestToolInBackpack(this::isAxeItem, Items.STONE_AXE)
+                : this.findBestToolInBackpack(this::isPickaxeItem, Items.STONE_PICKAXE);
+        if (preferred.isEmpty()) {
+            return false;
+        }
+        this.setItemSlot(EquipmentSlot.MAINHAND, preferred.copy());
+        return true;
+    }
+
+    boolean runtimeAdjustViewTo(BlockPos target) {
+        if (target == null) {
+            return false;
+        }
+        Vec3 center = Vec3.atCenterOf(target);
+        this.facePosition(center);
+        this.setForcedLookTarget(center, 12);
+        return true;
+    }
+
+    boolean runtimeRaiseShieldGuard() {
+        this.ensureShieldInOffhand();
+        if (this.getOffhandItem().getItem() != Items.SHIELD) {
+            return false;
+        }
+        this.shieldGuardTicks = Math.max(this.shieldGuardTicks, 12);
+        if (!this.isUsingItem() || this.getUsedItemHand() != InteractionHand.OFF_HAND) {
+            this.startUsingItem(InteractionHand.OFF_HAND);
+        }
+        return true;
+    }
+
+    boolean runtimeShouldUseShieldNow() {
+        boolean closeThreat = this.observedHostile != null && this.observedHostile.isAlive() && this.distanceToSqr(this.observedHostile) <= 100.0D;
+        return closeThreat || this.hasIncomingArrowThreat(10.0D);
+    }
+
+    void runtimeLowerShieldGuard() {
+        this.shieldGuardTicks = 0;
+        if (this.isUsingItem() && this.getUsedItemHand() == InteractionHand.OFF_HAND) {
+            this.stopUsingItem();
+        }
     }
 
     boolean runtimeHasNearbyDrops() {
@@ -4114,6 +4247,7 @@ public class AIPlayerEntity extends Zombie {
         if (!(this.level() instanceof ServerLevel serverLevel)) {
             return false;
         }
+        this.facePosition(Vec3.atCenterOf(pos));
         this.swing(InteractionHand.MAIN_HAND);
         serverLevel.setBlock(pos, placement, 3);
         WorldScanner.invalidateAt(serverLevel, pos);
@@ -4127,7 +4261,7 @@ public class AIPlayerEntity extends Zombie {
         boolean previousJump = this.pendingWasdJump;
         this.pendingWasdForward = Mth.clamp(forward, -1.0F, 1.0F);
         this.pendingWasdStrafe = Mth.clamp(strafe, -1.0F, 1.0F);
-        this.pendingWasdSpeed = Mth.clamp(speed, 0.0F, 0.35F);
+        this.pendingWasdSpeed = Mth.clamp(speed, 0.0F, 0.42F);
         this.pendingWasdTargetYaw = targetYaw;
         this.pendingWasdSprint = sprint;
         this.pendingWasdJump = jump;
@@ -4142,7 +4276,10 @@ public class AIPlayerEntity extends Zombie {
             return false;
         }
         float yawDelta = Mth.wrapDegrees(this.pendingWasdTargetYaw - this.getYRot());
-        float yawStep = Math.abs(yawDelta) > 65.0F ? WASD_MAX_YAW_STEP * 1.35F : WASD_MAX_YAW_STEP;
+        float absYawDelta = Math.abs(yawDelta);
+        float yawStep = absYawDelta > 100.0F
+                ? WASD_MAX_YAW_STEP * 1.65F
+                : (absYawDelta > 65.0F ? WASD_MAX_YAW_STEP * 1.35F : WASD_MAX_YAW_STEP);
         float nextYaw = Mth.approachDegrees(this.getYRot(), this.pendingWasdTargetYaw, yawStep);
         this.setYRot(nextYaw);
         this.setYHeadRot(nextYaw);

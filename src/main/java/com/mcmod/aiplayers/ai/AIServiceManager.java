@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeUnit;
 import net.minecraft.server.level.ServerPlayer;
 
 public final class AIServiceManager {
@@ -118,13 +119,13 @@ public final class AIServiceManager {
             HttpClient client = createClient();
             HttpRequest request = buildGoalPlanningRequest(companion, snapshot, localGoal);
             lastStatus = "任务目标规划请求中";
-            return client.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+            return sendAsyncWithRetries(client, request, "任务规划")
                     .handle((response, throwable) -> {
                         if (throwable != null) {
                             Throwable cause = throwable instanceof CompletionException completion && completion.getCause() != null
                                     ? completion.getCause()
                                     : throwable;
-                            lastStatus = cause.getClass().getSimpleName() + ": " + cause.getMessage();
+                            lastStatus = normalizeFailureStatus("任务规划", cause);
                             return null;
                         }
                         return parseGoalPlanHttpResponse(response);
@@ -157,17 +158,43 @@ public final class AIServiceManager {
             lastStatus = config.enabled ? "AI 接口配置不完整" : "本地规则模式";
             return null;
         }
+        int attempts = Math.max(1, config.maxRetries + 1);
         try {
             HttpClient client = createClient();
             HttpRequest request = buildConversationRequest(companion, speaker, message);
             lastStatus = "对话请求中";
-            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            return parseConversationHttpResponse(response);
+            IOException lastIoEx = null;
+            InterruptedException lastInterrupt = null;
+            for (int attempt = 0; attempt < attempts; attempt++) {
+                try {
+                    HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                    return parseConversationHttpResponse(response);
+                } catch (IOException ioEx) {
+                    lastIoEx = ioEx;
+                    if (attempt < attempts - 1 && shouldRetry(ioEx)) {
+                        continue;
+                    }
+                    throw ioEx;
+                } catch (InterruptedException interruptedEx) {
+                    lastInterrupt = interruptedEx;
+                    if (attempt < attempts - 1 && shouldRetry(interruptedEx)) {
+                        continue;
+                    }
+                    throw interruptedEx;
+                }
+            }
+            if (lastInterrupt != null) {
+                throw lastInterrupt;
+            }
+            if (lastIoEx != null) {
+                throw lastIoEx;
+            }
+            return null;
         } catch (IOException | InterruptedException | IllegalArgumentException ex) {
             if (ex instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            lastStatus = ex.getClass().getSimpleName() + ": " + ex.getMessage();
+            lastStatus = normalizeFailureStatus("对话", ex);
             return null;
         }
     }
@@ -181,13 +208,13 @@ public final class AIServiceManager {
             HttpClient client = createClient();
             HttpRequest request = buildConversationRequest(companion, speaker, message);
             lastStatus = "对话请求中";
-            return client.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+            return sendAsyncWithRetries(client, request, "对话")
                     .handle((response, throwable) -> {
                         if (throwable != null) {
                             Throwable cause = throwable instanceof CompletionException completion && completion.getCause() != null
                                     ? completion.getCause()
                                     : throwable;
-                            lastStatus = cause.getClass().getSimpleName() + ": " + cause.getMessage();
+                            lastStatus = normalizeFailureStatus("对话", cause);
                             return null;
                         }
                         return parseConversationHttpResponse(response);
@@ -200,7 +227,7 @@ public final class AIServiceManager {
 
     private static HttpClient createClient() {
         return HttpClient.newBuilder()
-                .connectTimeout(Duration.ofMillis(Math.max(1000, config.timeoutMs)))
+                .connectTimeout(Duration.ofMillis(Math.max(3000, Math.min(config.timeoutMs, 12000))))
                 .build();
     }
 
@@ -240,13 +267,65 @@ public final class AIServiceManager {
 
     private static HttpRequest createRequest(JsonObject root) {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(config.url))
-                .timeout(Duration.ofMillis(Math.max(1000, config.timeoutMs)))
+                .timeout(Duration.ofMillis(Math.max(4000, config.timeoutMs)))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(root), StandardCharsets.UTF_8));
         if (config.apiKey != null && !config.apiKey.isBlank()) {
             builder.header("Authorization", "Bearer " + config.apiKey);
         }
         return builder.build();
+    }
+
+    private static CompletableFuture<HttpResponse<String>> sendAsyncWithRetries(HttpClient client, HttpRequest request, String scope) {
+        int retries = Math.max(0, config.maxRetries);
+        CompletableFuture<HttpResponse<String>> result = new CompletableFuture<>();
+        sendAsyncAttempt(client, request, scope, 0, retries, result);
+        return result;
+    }
+
+    private static void sendAsyncAttempt(HttpClient client, HttpRequest request, String scope, int attempt, int maxRetries, CompletableFuture<HttpResponse<String>> result) {
+        client.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+                .whenComplete((response, throwable) -> {
+                    if (throwable == null) {
+                        result.complete(response);
+                        return;
+                    }
+                    Throwable cause = throwable instanceof CompletionException completion && completion.getCause() != null
+                            ? completion.getCause()
+                            : throwable;
+                    if (attempt < maxRetries && shouldRetry(cause)) {
+                        int nextAttempt = attempt + 1;
+                        lastStatus = scope + "超时/网络抖动，重试 " + nextAttempt + "/" + maxRetries;
+                        long backoffMs = Math.min(2000L, 400L * nextAttempt);
+                        CompletableFuture.delayedExecutor(backoffMs, TimeUnit.MILLISECONDS)
+                                .execute(() -> sendAsyncAttempt(client, request, scope, nextAttempt, maxRetries, result));
+                        return;
+                    }
+                    result.completeExceptionally(cause);
+                });
+    }
+
+    private static boolean shouldRetry(Throwable throwable) {
+        if (throwable == null) {
+            return false;
+        }
+        String message = throwable.getMessage() == null ? "" : throwable.getMessage().toLowerCase();
+        return message.contains("timeout")
+                || message.contains("timed out")
+                || message.contains("connection reset")
+                || message.contains("connectexception")
+                || message.contains("closedchannel");
+    }
+
+    private static String normalizeFailureStatus(String scope, Throwable throwable) {
+        if (throwable == null) {
+            return scope + "失败";
+        }
+        String message = throwable.getMessage() == null ? "" : throwable.getMessage().toLowerCase();
+        if (message.contains("timeout") || message.contains("timed out")) {
+            return scope + "超时，已回退本地";
+        }
+        return throwable.getClass().getSimpleName() + ": " + throwable.getMessage();
     }
 
     private static String buildConversationSystemPrompt() {
@@ -329,7 +408,7 @@ public final class AIServiceManager {
                 if (message != null) {
                     String content = getString(message, "content");
                     if (content != null && !content.isBlank()) {
-                        return parseAssistantContent(content);
+                        return parseAssistantContent(extractJsonCandidate(content));
                     }
                 }
             }
@@ -348,7 +427,7 @@ public final class AIServiceManager {
                 if (message != null) {
                     String content = getString(message, "content");
                     if (content != null && !content.isBlank()) {
-                        JsonObject object = JsonParser.parseString(content).getAsJsonObject();
+                        JsonObject object = JsonParser.parseString(extractJsonCandidate(content)).getAsJsonObject();
                         return parseGoalPlanObject(object);
                     }
                 }
@@ -371,6 +450,30 @@ public final class AIServiceManager {
         } catch (RuntimeException ex) {
             return new AIServiceResponse(content, "unchanged", "", Map.of(), "none", "api");
         }
+    }
+
+    private static String extractJsonCandidate(String content) {
+        if (content == null || content.isBlank()) {
+            return "{}";
+        }
+        String trimmed = content.trim();
+        int fencedStart = trimmed.indexOf("```");
+        if (fencedStart >= 0) {
+            int firstLineEnd = trimmed.indexOf('\n', fencedStart + 3);
+            int fencedEnd = trimmed.lastIndexOf("```");
+            if (firstLineEnd > fencedStart && fencedEnd > firstLineEnd) {
+                String fenced = trimmed.substring(firstLineEnd + 1, fencedEnd).trim();
+                if (fenced.startsWith("{") && fenced.endsWith("}")) {
+                    return fenced;
+                }
+            }
+        }
+        int jsonStart = trimmed.indexOf('{');
+        int jsonEnd = trimmed.lastIndexOf('}');
+        if (jsonStart >= 0 && jsonEnd > jsonStart) {
+            return trimmed.substring(jsonStart, jsonEnd + 1);
+        }
+        return trimmed;
     }
 
     private static AIGoalPlanResponse parseGoalPlanObject(JsonObject object) {
@@ -496,7 +599,7 @@ public final class AIServiceManager {
             config.url = DEFAULT_CHAT_URL;
             config.apiKey = "";
             config.model = DEFAULT_CHAT_MODEL;
-            config.timeoutMs = 8000;
+            config.timeoutMs = 15000;
             config.plannerMode = DEFAULT_PLANNER_MODE;
             config.conversationEnabled = false;
             config.taskPlanningEnabled = false;
@@ -521,7 +624,7 @@ public final class AIServiceManager {
                 this.model = DEFAULT_CHAT_MODEL;
             }
             if (this.timeoutMs <= 0) {
-                this.timeoutMs = 8000;
+                this.timeoutMs = 15000;
             }
             if (this.taskAiIntervalSeconds <= 0) {
                 this.taskAiIntervalSeconds = 5;

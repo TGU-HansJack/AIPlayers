@@ -30,6 +30,17 @@ public final class InteractionExecutor {
         return switch (action.type()) {
             case MOVE_NEAR -> executeMove(entity, action);
             case LOOK_AT -> executeLook(entity, action);
+            case ADJUST_VIEW -> executeAdjustView(entity, action);
+            case EQUIP_TOOL -> entity.runtimePrepareHarvestTool(action.woodTask())
+                    ? ActionExecutionResult.SUCCESS
+                    : ActionExecutionResult.RUNNING;
+            case RAISE_SHIELD -> entity.runtimeRaiseShieldGuard()
+                    ? ActionExecutionResult.SUCCESS
+                    : ActionExecutionResult.RUNNING;
+            case LOWER_SHIELD -> {
+                entity.runtimeLowerShieldGuard();
+                yield ActionExecutionResult.SUCCESS;
+            }
             case CLEAR_PATH -> executeClearPath(entity, action);
             case BREAK_TARGET -> executeBreakTarget(entity, action);
             case PLACE_BLOCK -> executePlaceBlock(entity, action);
@@ -57,7 +68,8 @@ public final class InteractionExecutor {
             return ActionExecutionResult.SUCCESS;
         }
         if (!entity.runtimeNavigateToPosition(target, action.speed())) {
-            return ActionExecutionResult.FAILED;
+            entity.runtimeRemember("交互", "移动受阻，继续重试：" + action.label());
+            return ActionExecutionResult.RUNNING;
         }
         return ActionExecutionResult.RUNNING;
     }
@@ -71,6 +83,14 @@ public final class InteractionExecutor {
         return ActionExecutionResult.SUCCESS;
     }
 
+    private static ActionExecutionResult executeAdjustView(AIPlayerEntity entity, InteractionAction action) {
+        BlockPos target = action.targetPos();
+        if (target == null) {
+            return ActionExecutionResult.SUCCESS;
+        }
+        return entity.runtimeAdjustViewTo(target) ? ActionExecutionResult.SUCCESS : ActionExecutionResult.RUNNING;
+    }
+
     private static ActionExecutionResult executeClearPath(AIPlayerEntity entity, InteractionAction action) {
         BlockPos target = action.targetPos();
         if (target == null) {
@@ -82,8 +102,11 @@ public final class InteractionExecutor {
         if (!entity.runtimeCanHarvestFromHere(target)) {
             BlockPos approach = entity.runtimeFindApproachPosition(target);
             BlockPos moveTarget = approach != null ? approach : entity.runtimeResolveMovementTarget(target);
-            if (moveTarget == null || !entity.runtimeNavigateToPosition(moveTarget, action.speed())) {
-                return ActionExecutionResult.FAILED;
+            if (moveTarget == null) {
+                return ActionExecutionResult.RUNNING;
+            }
+            if (!entity.runtimeNavigateToPosition(moveTarget, action.speed())) {
+                return ActionExecutionResult.RUNNING;
             }
             entity.runtimeLookAt(Vec3.atCenterOf(target), 10);
             return ActionExecutionResult.RUNNING;
@@ -106,8 +129,11 @@ public final class InteractionExecutor {
             BlockPos focus = obstacle != null ? obstacle : target;
             BlockPos approach = entity.runtimeFindApproachPosition(focus);
             BlockPos moveTarget = approach != null ? approach : entity.runtimeResolveMovementTarget(focus);
-            if (moveTarget == null || !entity.runtimeNavigateToPosition(moveTarget, action.speed())) {
-                return ActionExecutionResult.FAILED;
+            if (moveTarget == null) {
+                return ActionExecutionResult.RUNNING;
+            }
+            if (!entity.runtimeNavigateToPosition(moveTarget, action.speed())) {
+                return ActionExecutionResult.RUNNING;
             }
             entity.runtimeLookAt(Vec3.atCenterOf(focus), 10);
             return ActionExecutionResult.RUNNING;
@@ -128,8 +154,11 @@ public final class InteractionExecutor {
         if (!entity.runtimeIsWithin(target, action.completionDistanceSqr())) {
             BlockPos approach = entity.runtimeFindApproachPosition(target);
             BlockPos moveTarget = approach != null ? approach : entity.runtimeResolveMovementTarget(target);
-            if (moveTarget == null || !entity.runtimeNavigateToPosition(moveTarget, action.speed())) {
-                return ActionExecutionResult.FAILED;
+            if (moveTarget == null) {
+                return ActionExecutionResult.RUNNING;
+            }
+            if (!entity.runtimeNavigateToPosition(moveTarget, action.speed())) {
+                return ActionExecutionResult.RUNNING;
             }
             entity.runtimeLookAt(Vec3.atCenterOf(target), 10);
             return ActionExecutionResult.RUNNING;
