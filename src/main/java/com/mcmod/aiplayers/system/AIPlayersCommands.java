@@ -162,7 +162,7 @@ public final class AIPlayersCommands {
         AIPlayerEntity companion = resolveCompanion(context, "target");
         String blueprintId = StringArgumentType.getString(context, "blueprint");
         companion.selectBlueprint(blueprintId);
-        context.getSource().sendSuccess(() -> Component.literal("\u5df2\u5c06 " + companion.getAIName() + " \u7684\u84dd\u56fe\u5207\u6362\u4e3a\uff1a" + BlueprintRegistry.get(companion.getActiveBlueprintId()).displayName()), false);
+        context.getSource().sendSuccess(() -> Component.literal("已将 " + companion.getAIName() + " 的蓝图切换为：" + BlueprintRegistry.get(companion.getActiveBlueprintId()).displayName()), false);
         return 1;
     }
 

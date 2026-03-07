@@ -11,7 +11,7 @@ final class PlayerMovementController {
     private BlockPos targetPos;
     private int pathIndex;
     private double speedModifier = 1.0D;
-    private String pathStatus = "\u7a7a\u95f2";
+    private String pathStatus = "空闲";
     private Vec3 lastSample = Vec3.ZERO;
     private int stuckTicks;
 
@@ -22,7 +22,7 @@ final class PlayerMovementController {
     boolean requestPathTo(BlockPos target, double speedModifier) {
         BlockPos resolvedTarget = this.entity.runtimeResolveMovementTarget(target);
         if (resolvedTarget == null) {
-            this.pathStatus = "\u76ee\u6807\u4e0d\u53ef\u8fbe";
+            this.pathStatus = "目标不可达";
             return false;
         }
         if (this.targetPos != null && this.targetPos.distSqr(resolvedTarget) <= 1.0D && !this.activePath.isEmpty()) {
@@ -35,7 +35,7 @@ final class PlayerMovementController {
         long gameTime = this.entity.level().getGameTime();
         boolean budgetGranted = TeamKnowledge.tryAcquirePathBudget(this.entity, gameTime);
         if (!budgetGranted && !this.activePath.isEmpty()) {
-            this.pathStatus = "\u56e2\u961f\u8def\u5f84\u9884\u7b97\u5fd9\uff0c\u6cbf\u7528\u5f53\u524d\u8def\u5f84";
+            this.pathStatus = "团队路径预算忙，沿用当前路径";
             return true;
         }
 
@@ -43,7 +43,7 @@ final class PlayerMovementController {
                 ? AgentPathPlanner.plan(this.entity, this.targetPos)
                 : List.of(new PathNode(Vec3.atCenterOf(this.targetPos)));
         this.pathIndex = 0;
-        this.pathStatus = this.activePath.size() > 1 ? "\u8def\u5f84\u5df2\u89c4\u5212" : (budgetGranted ? "\u76f4\u7ebf\u63a5\u8fd1" : "\u9884\u7b97\u5fd9\uff0c\u5148\u76f4\u7ebf\u9760\u8fd1");
+        this.pathStatus = this.activePath.size() > 1 ? "路径已规划" : (budgetGranted ? "直线接近" : "预算忙，先直线靠近");
         this.lastSample = this.entity.position();
         this.stuckTicks = 0;
         return !this.activePath.isEmpty();
@@ -53,7 +53,7 @@ final class PlayerMovementController {
         this.activePath = List.of();
         this.targetPos = null;
         this.pathIndex = 0;
-        this.pathStatus = "\u7a7a\u95f2";
+        this.pathStatus = "空闲";
         this.stuckTicks = 0;
         this.entity.setZza(0.0F);
         this.entity.setXxa(0.0F);
@@ -71,7 +71,7 @@ final class PlayerMovementController {
         if (this.activePath.isEmpty()) {
             this.requestPathTo(this.targetPos, this.speedModifier);
             if (this.activePath.isEmpty()) {
-                this.pathStatus = "\u65e0\u53ef\u7528\u8def\u5f84";
+                this.pathStatus = "无可用路径";
                 return;
             }
         }
@@ -91,8 +91,8 @@ final class PlayerMovementController {
         this.entity.getMoveControl().setWantedPosition(waypoint.x, waypoint.y, waypoint.z, appliedSpeed);
         this.entity.setSprinting(appliedSpeed > 1.18D);
         this.pathStatus = (this.entity.isInWater() || this.entity.isUnderWater() || this.entity.isInLava())
-                ? "\u6db2\u4f53\u8131\u56f0\u63a8\u8fdb\u4e2d"
-                : (this.pathIndex < this.activePath.size() - 1 ? "\u6cbf\u8def\u5f84\u63a8\u8fdb" : "\u6700\u7ec8\u63a5\u8fd1\u76ee\u6807");
+                ? "液体脱困推进中"
+                : (this.pathIndex < this.activePath.size() - 1 ? "沿路径推进" : "最终接近目标");
         if (this.entity.isInWater() || this.entity.isUnderWater() || this.entity.isInLava()) {
             Vec3 motion = this.entity.getDeltaMovement();
             this.entity.setDeltaMovement(motion.x, Math.max(motion.y, 0.08D), motion.z);
@@ -123,7 +123,7 @@ final class PlayerMovementController {
         this.entity.setZza(0.0F);
         this.entity.setXxa(0.0F);
         this.entity.setSpeed(0.0F);
-        this.pathStatus = "\u5df2\u5230\u8fbe";
+        this.pathStatus = "已到达";
     }
 
     private void detectStuckAndRecover() {
@@ -138,7 +138,7 @@ final class PlayerMovementController {
             return;
         }
 
-        this.pathStatus = "\u5c40\u90e8\u907f\u969c\u4e2d";
+        this.pathStatus = "局部避障中";
         if (this.entity.onGround()) {
             this.entity.getJumpControl().jump();
         }
@@ -155,7 +155,7 @@ final class PlayerMovementController {
                 this.targetPos = localStandPos;
                 this.activePath = List.of(new PathNode(Vec3.atCenterOf(localStandPos)));
                 this.pathIndex = 0;
-                this.pathStatus = "\u5207\u6362\u5230\u5c40\u90e8\u53ef\u7ad9\u7acb\u70b9";
+                this.pathStatus = "切换到局部可站立点";
             }
         }
 
@@ -164,11 +164,11 @@ final class PlayerMovementController {
             if (TeamKnowledge.tryAcquirePathBudget(this.entity, gameTime)) {
                 this.activePath = AgentPathPlanner.plan(this.entity, this.targetPos);
                 this.pathIndex = 0;
-                this.pathStatus = "\u8def\u5f84\u91cd\u7b97";
+                this.pathStatus = "路径重算";
                 this.stuckTicks = 0;
                 this.lastSample = this.entity.position();
             } else {
-                this.pathStatus = "\u56e2\u961f\u8def\u5f84\u9884\u7b97\u5fd9\uff0c\u7b49\u5f85\u91cd\u7b97\u7a97\u53e3";
+                this.pathStatus = "团队路径预算忙，等待重算窗口";
             }
         }
     }

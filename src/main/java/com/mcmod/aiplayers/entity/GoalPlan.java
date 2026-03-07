@@ -5,7 +5,7 @@ import java.util.stream.Collectors;
 
 public record GoalPlan(AgentGoal goal, List<PlannedAction> actions, String reasoning, String source, List<GoapCondition> desiredConditions) {
     public GoalPlan {
-        goal = goal == null ? AgentGoal.of(GoalType.IDLE, "local", "\u5f85\u547d") : goal;
+        goal = goal == null ? AgentGoal.of(GoalType.IDLE, "local", "待命") : goal;
         actions = actions == null ? List.of() : List.copyOf(actions);
         reasoning = reasoning == null || reasoning.isBlank() ? goal.reasoning() : reasoning;
         source = source == null || source.isBlank() ? goal.source() : source;
@@ -25,9 +25,9 @@ public record GoalPlan(AgentGoal goal, List<PlannedAction> actions, String reaso
 
     public String goalConditionSummary() {
         if (this.desiredConditions.isEmpty()) {
-            return "\u65e0\u663e\u5f0f\u76ee\u6807\u6761\u4ef6";
+            return "无显式目标条件";
         }
-        return this.desiredConditions.stream().map(GoapCondition::summary).collect(Collectors.joining("\u3001"));
+        return this.desiredConditions.stream().map(GoapCondition::summary).collect(Collectors.joining("、"));
     }
 
     public PlannedAction firstAction() {

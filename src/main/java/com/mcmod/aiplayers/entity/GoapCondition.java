@@ -4,7 +4,7 @@ public record GoapCondition(GoapFact fact, boolean expected, String description)
     public GoapCondition {
         fact = fact == null ? GoapFact.OBSERVATION_REFRESHED : fact;
         description = description == null || description.isBlank()
-                ? fact.displayName() + (expected ? "=\u9700\u8981" : "=\u4e0d\u9700\u8981")
+                ? fact.displayName() + (expected ? "=需要" : "=不需要")
                 : description;
     }
 

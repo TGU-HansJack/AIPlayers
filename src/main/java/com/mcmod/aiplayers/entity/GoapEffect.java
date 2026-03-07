@@ -4,7 +4,7 @@ public record GoapEffect(GoapFact fact, boolean value, String description) {
     public GoapEffect {
         fact = fact == null ? GoapFact.OBSERVATION_REFRESHED : fact;
         description = description == null || description.isBlank()
-                ? fact.displayName() + "->" + (value ? "\u5df2\u8fbe\u6210" : "\u5df2\u53d6\u6d88")
+                ? fact.displayName() + "->" + (value ? "已达成" : "已取消")
                 : description;
     }
 

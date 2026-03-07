@@ -69,12 +69,12 @@ public final class GoapPlanningState {
 
     public String describeUnsatisfied(List<GoapCondition> conditions) {
         if (conditions == null || conditions.isEmpty()) {
-            return "\u65e0";
+            return "无";
         }
         return conditions.stream()
                 .filter(condition -> condition != null && !condition.matches(this))
                 .map(GoapCondition::summary)
-                .collect(Collectors.joining("\u3001"));
+                .collect(Collectors.joining("、"));
     }
 
     public String key() {

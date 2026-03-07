@@ -38,7 +38,7 @@ public final class AILongTermMemoryStore {
         synchronized (getLock(path)) {
             StoreCache cache = loadCache(path);
             MemoryProfile profile = cache.profiles.computeIfAbsent(buildProfileKey(entity), unused -> new MemoryProfile());
-            profile.events.add(type + "\uff1a" + detail);
+            profile.events.add(type + "：" + detail);
             while (profile.events.size() > MAX_EVENTS) {
                 profile.events.remove(0);
             }
@@ -75,13 +75,13 @@ public final class AILongTermMemoryStore {
     public static String getSummary(AIPlayerEntity entity) {
         Path path = resolvePath(entity);
         if (path == null) {
-            return "\u6682\u65e0\u957f\u671f\u8bb0\u5fc6";
+            return "暂无长期记忆";
         }
 
         synchronized (getLock(path)) {
             MemoryProfile profile = loadCache(path).profiles.get(buildProfileKey(entity));
             if (profile == null) {
-                return "\u6682\u65e0\u957f\u671f\u8bb0\u5fc6";
+                return "暂无长期记忆";
             }
 
             List<String> parts = new ArrayList<>();
@@ -92,24 +92,24 @@ public final class AILongTermMemoryStore {
                         .findFirst()
                         .orElse(null);
                 if (topType != null) {
-                    parts.add("\u504f\u597d=" + topType);
+                    parts.add("偏好=" + topType);
                 }
             }
 
             String goal = profile.notes.get("goal");
             if (goal != null && !goal.isBlank()) {
-                parts.add("\u76ee\u6807=" + goal);
+                parts.add("目标=" + goal);
             }
 
             String blueprint = profile.notes.get("blueprint");
             if (blueprint != null && !blueprint.isBlank()) {
-                parts.add("\u84dd\u56fe=" + blueprint);
+                parts.add("蓝图=" + blueprint);
             }
 
             if (!profile.events.isEmpty()) {
-                parts.add("\u6700\u8fd1=" + profile.events.get(profile.events.size() - 1));
+                parts.add("最近=" + profile.events.get(profile.events.size() - 1));
             }
-            return parts.isEmpty() ? "\u6682\u65e0\u957f\u671f\u8bb0\u5fc6" : String.join("\uff1b", parts);
+            return parts.isEmpty() ? "暂无长期记忆" : String.join("；", parts);
         }
     }
 

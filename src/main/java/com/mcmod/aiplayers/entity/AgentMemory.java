@@ -7,9 +7,9 @@ import java.util.stream.Collectors;
 
 public final class AgentMemory {
     private final Deque<String> recentEvents = new ArrayDeque<>();
-    private String lastFailure = "\u6682\u65e0\u5931\u8d25";
-    private String lastLearning = "\u6682\u65e0\u5b66\u4e60";
-    private String lastAction = "\u5f85\u547d";
+    private String lastFailure = "暂无失败";
+    private String lastLearning = "暂无学习";
+    private String lastAction = "待命";
 
     public void noteEvent(String event) {
         if (event == null || event.isBlank()) {
@@ -26,12 +26,12 @@ public final class AgentMemory {
 
     public void noteFailure(String detail) {
         this.lastFailure = detail == null || detail.isBlank() ? this.lastFailure : detail;
-        this.noteEvent("\u5931\u8d25\uff1a" + this.lastFailure);
+        this.noteEvent("失败：" + this.lastFailure);
     }
 
     public void noteLearning(String detail) {
         this.lastLearning = detail == null || detail.isBlank() ? this.lastLearning : detail;
-        this.noteEvent("\u5b66\u4e60\uff1a" + this.lastLearning);
+        this.noteEvent("学习：" + this.lastLearning);
     }
 
     public void noteAction(String action) {
@@ -48,7 +48,7 @@ public final class AgentMemory {
 
     public String recentSummary() {
         if (this.recentEvents.isEmpty()) {
-            return "\u6682\u65e0";
+            return "暂无";
         }
         return this.recentEvents.stream().collect(Collectors.joining(" | "));
     }

@@ -340,7 +340,7 @@ public class AIPlayerEntity extends Zombie {
         if (normalizedMode != AIPlayerMode.BUILD_SHELTER) {
             this.shelterAnchor = null;
         }
-        this.remember("\u6a21\u5f0f", "\u5207\u6362\u4e3a " + normalizedMode.displayName());
+        this.remember("模式", "切换为 " + normalizedMode.displayName());
         this.refreshDisplayName();
         this.markPersistentDirty();
     }
@@ -3659,27 +3659,27 @@ public class AIPlayerEntity extends Zombie {
     private String buildCognitiveSummary() {
         List<String> parts = new ArrayList<>();
         if (this.observedHostile != null && this.observedHostile.isAlive()) {
-            parts.add("\u611f\u77e5\u5230\u654c\u5bf9\u5a01\u80c1");
+            parts.add("感知到敌对威胁");
         }
         if (this.observedDrop != null && this.observedDrop.isAlive()) {
-            parts.add("\u9644\u8fd1\u6709\u53ef\u62fe\u53d6\u6389\u843d\u7269");
+            parts.add("附近有可拾取掉落物");
         }
         if (this.hasLowFoodSupply()) {
-            parts.add("\u98df\u7269\u504f\u5c11");
+            parts.add("食物偏少");
         }
         if (this.hasLowTools()) {
-            parts.add("\u5de5\u5177\u4e0d\u8db3");
+            parts.add("工具不足");
         }
         if (this.rememberedLog != null) {
-            parts.add("\u8bb0\u5f97\u6728\u6750\u4f4d\u7f6e");
+            parts.add("记得木材位置");
         }
         if (this.rememberedOre != null) {
-            parts.add("\u8bb0\u5f97\u77ff\u70b9\u4f4d\u7f6e");
+            parts.add("记得矿点位置");
         }
         if (parts.isEmpty()) {
-            return "\u73af\u5883\u7a33\u5b9a\uff0c\u7ee7\u7eed\u89c2\u5bdf";
+            return "环境稳定，继续观察";
         }
-        return String.join("\uff1b", parts);
+        return String.join("；", parts);
     }
 
     private void sendOwnerAlert(String message, boolean force) {

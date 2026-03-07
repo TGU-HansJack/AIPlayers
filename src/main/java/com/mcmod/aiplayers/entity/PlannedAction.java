@@ -39,19 +39,19 @@ public record PlannedAction(
 
     public String preconditionSummary() {
         if (this.preconditions.isEmpty()) {
-            return "\u65e0";
+            return "无";
         }
-        return this.preconditions.stream().map(GoapCondition::summary).collect(Collectors.joining("\u3001"));
+        return this.preconditions.stream().map(GoapCondition::summary).collect(Collectors.joining("、"));
     }
 
     public String effectSummary() {
         if (this.effects.isEmpty()) {
-            return "\u65e0";
+            return "无";
         }
-        return this.effects.stream().map(GoapEffect::summary).collect(Collectors.joining("\u3001"));
+        return this.effects.stream().map(GoapEffect::summary).collect(Collectors.joining("、"));
     }
 
     public String detailSummary() {
-        return "\u524d\u7f6e=" + this.preconditionSummary() + "\uff1b\u6548\u679c=" + this.effectSummary() + "\uff1b\u4ee3\u4ef7=" + this.cost;
+        return "前置=" + this.preconditionSummary() + "；效果=" + this.effectSummary() + "；代价=" + this.cost;
     }
 }

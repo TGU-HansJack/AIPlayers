@@ -31,7 +31,7 @@ public class AIPlayersControlScreen extends Screen {
     private int maxScroll;
 
     public AIPlayersControlScreen() {
-        super(Component.literal("AI Players \u63a7\u5236\u9762\u677f"));
+        super(Component.literal("AI Players 控制面板"));
     }
 
     @Override
@@ -79,20 +79,20 @@ public class AIPlayersControlScreen extends Screen {
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         super.render(graphics, mouseX, mouseY, partialTick);
         graphics.drawString(this.font, this.title, 12, HEADER_TOP, 0xFFFFFF);
-        graphics.drawString(this.font, "\u9644\u8fd1 AI\uff1a" + this.nearby.size(), 12, HEADER_TOP + 16, 0xC0C0C0);
-        graphics.drawString(this.font, "\u5f53\u524d\u76ee\u6807\uff1a" + this.getSelectedName(), 220, HEADER_TOP + 16, 0xC0C0C0);
+        graphics.drawString(this.font, "附近 AI：" + this.nearby.size(), 12, HEADER_TOP + 16, 0xC0C0C0);
+        graphics.drawString(this.font, "当前目标：" + this.getSelectedName(), 220, HEADER_TOP + 16, 0xC0C0C0);
         graphics.drawString(this.font, AIPlayersVoiceClient.getStatusSummary(), 220, HEADER_TOP + 32, 0x88D8FF);
 
         int summaryY = this.getSummaryTop();
         if (this.selected != null) {
             graphics.drawString(this.font, this.selected.getClientStatusLine(), 12, summaryY, 0xD8FFD8);
-            graphics.drawString(this.font, "\u89c2\u5bdf\uff1a" + this.selected.getClientObservationSummary(), 12, summaryY + 16, 0xC8E6FF);
-            graphics.drawString(this.font, "\u80cc\u5305\uff1a" + this.selected.getClientInventorySummary(), 12, summaryY + 32, 0xFFE7A8);
+            graphics.drawString(this.font, "观察：" + this.selected.getClientObservationSummary(), 12, summaryY + 16, 0xC8E6FF);
+            graphics.drawString(this.font, "背包：" + this.selected.getClientInventorySummary(), 12, summaryY + 32, 0xFFE7A8);
         }
         if (this.maxScroll > 0) {
-            graphics.drawString(this.font, "\u6eda\u8f6e\u53ef\u4e0a\u4e0b\u6eda\u52a8 (" + this.scrollOffset + "/" + this.maxScroll + ")", this.width - 180, summaryY, 0x909090);
+            graphics.drawString(this.font, "滚轮可上下滚动 (" + this.scrollOffset + "/" + this.maxScroll + ")", this.width - 180, summaryY, 0x909090);
         }
-        graphics.drawString(this.font, "\u63d0\u793a\uff1a\u53ef\u76f4\u63a5\u4e0e AI \u5bf9\u8bdd\uff0c\u4e5f\u53ef\u7528\u5feb\u6377\u6309\u94ae\u53d1\u9001\u547d\u4ee4\u3002", 12, this.height - 18, 0x909090);
+        graphics.drawString(this.font, "提示：可直接与 AI 对话，也可用快捷按钮发送命令。", 12, this.height - 18, 0x909090);
     }
 
     private void rebuildPanel() {
@@ -128,44 +128,44 @@ public class AIPlayersControlScreen extends Screen {
             }).bounds(leftX, topY + index * rowHeight, buttonWidth, 20).build());
         }
 
-        this.addActionButton(gridX, gridY, "\u8ddf\u968f", () -> this.sendTargetMessage("\u8ddf\u968f"));
-        this.addActionButton(gridX + 110, gridY, "\u62a4\u536b", () -> this.sendTargetMessage("\u62a4\u536b"));
-        this.addActionButton(gridX, gridY + 24, "\u780d\u6811", () -> this.sendTargetMessage("\u780d\u6811"));
-        this.addActionButton(gridX + 110, gridY + 24, "\u6316\u77ff", () -> this.sendTargetMessage("\u6316\u77ff"));
-        this.addActionButton(gridX, gridY + 48, "\u63a2\u7d22", () -> this.sendTargetMessage("\u63a2\u7d22"));
-        this.addActionButton(gridX + 110, gridY + 48, "\u5efa\u9020", () -> this.sendTargetMessage("\u5efa\u9020"));
-        this.addActionButton(gridX, gridY + 72, "\u907f\u96be\u6240", () -> this.sendTargetMessage("\u5efa\u9020\u907f\u96be\u6240"));
-        this.addActionButton(gridX + 110, gridY + 72, "\u751f\u5b58", () -> this.sendTargetMessage("\u751f\u5b58"));
-        this.addActionButton(gridX, gridY + 96, "\u8df3\u8dc3", () -> this.sendTargetMessage("\u8df3\u4e00\u4e0b"));
-        this.addActionButton(gridX + 110, gridY + 96, "\u8e72\u4e0b", () -> this.sendTargetMessage("\u8e72\u4e0b"));
-        this.addActionButton(gridX, gridY + 120, "\u62ac\u5934", () -> this.sendTargetMessage("\u62ac\u5934"));
-        this.addActionButton(gridX + 110, gridY + 120, "\u4f4e\u5934", () -> this.sendTargetMessage("\u4f4e\u5934"));
-        this.addActionButton(gridX, gridY + 144, AIPlayersVoiceClient.isRecording() ? "\u505c\u6b62\u5f55\u97f3" : "\u5f00\u59cb\u5f55\u97f3", () -> AIPlayersVoiceClient.toggleRecording(this.getSelectedName()));
-        this.addActionButton(gridX + 110, gridY + 144, "\u5237\u65b0", this::refreshNearbyAndRebuild);
-        this.addActionButton(gridX, gridY + 168, "\u72b6\u6001", () -> this.sendTargetMessage("\u72b6\u6001"));
-        this.addActionButton(gridX + 110, gridY + 168, "\u80cc\u5305", () -> this.sendTargetMessage("\u770b\u770b\u80cc\u5305"));
-        this.addActionButton(gridX, gridY + 192, "\u8ba1\u5212", () -> this.sendTargetMessage("\u8ba1\u5212"));
-        this.addActionButton(gridX + 110, gridY + 192, "\u8131\u56f0", () -> this.sendTargetMessage("\u8131\u56f0"));
+        this.addActionButton(gridX, gridY, "跟随", () -> this.sendTargetMessage("跟随"));
+        this.addActionButton(gridX + 110, gridY, "护卫", () -> this.sendTargetMessage("护卫"));
+        this.addActionButton(gridX, gridY + 24, "砍树", () -> this.sendTargetMessage("砍树"));
+        this.addActionButton(gridX + 110, gridY + 24, "挖矿", () -> this.sendTargetMessage("挖矿"));
+        this.addActionButton(gridX, gridY + 48, "探索", () -> this.sendTargetMessage("探索"));
+        this.addActionButton(gridX + 110, gridY + 48, "建造", () -> this.sendTargetMessage("建造"));
+        this.addActionButton(gridX, gridY + 72, "避难所", () -> this.sendTargetMessage("建造避难所"));
+        this.addActionButton(gridX + 110, gridY + 72, "生存", () -> this.sendTargetMessage("生存"));
+        this.addActionButton(gridX, gridY + 96, "跳跃", () -> this.sendTargetMessage("跳一下"));
+        this.addActionButton(gridX + 110, gridY + 96, "蹲下", () -> this.sendTargetMessage("蹲下"));
+        this.addActionButton(gridX, gridY + 120, "抬头", () -> this.sendTargetMessage("抬头"));
+        this.addActionButton(gridX + 110, gridY + 120, "低头", () -> this.sendTargetMessage("低头"));
+        this.addActionButton(gridX, gridY + 144, AIPlayersVoiceClient.isRecording() ? "停止录音" : "开始录音", () -> AIPlayersVoiceClient.toggleRecording(this.getSelectedName()));
+        this.addActionButton(gridX + 110, gridY + 144, "刷新", this::refreshNearbyAndRebuild);
+        this.addActionButton(gridX, gridY + 168, "状态", () -> this.sendTargetMessage("状态"));
+        this.addActionButton(gridX + 110, gridY + 168, "背包", () -> this.sendTargetMessage("看看背包"));
+        this.addActionButton(gridX, gridY + 192, "计划", () -> this.sendTargetMessage("计划"));
+        this.addActionButton(gridX + 110, gridY + 192, "脱困", () -> this.sendTargetMessage("脱困"));
 
-        this.itemRequestBox = this.addRenderableWidget(new EditBox(this.font, gridX, gridY + 220, 120, 20, Component.literal("\u7269\u54c1")));
-        this.itemRequestBox.setHint(Component.literal("\u7269\u54c1\uff0c\u4f8b\u5982\uff1a\u6728\u5934"));
+        this.itemRequestBox = this.addRenderableWidget(new EditBox(this.font, gridX, gridY + 220, 120, 20, Component.literal("物品")));
+        this.itemRequestBox.setHint(Component.literal("物品，例如：木头"));
         this.itemRequestBox.setMaxLength(40);
         this.itemRequestBox.setValue(itemValue);
-        this.amountBox = this.addRenderableWidget(new EditBox(this.font, gridX + 126, gridY + 220, 38, 20, Component.literal("\u6570\u91cf")));
-        this.amountBox.setHint(Component.literal("\u5168\u90e8"));
+        this.amountBox = this.addRenderableWidget(new EditBox(this.font, gridX + 126, gridY + 220, 38, 20, Component.literal("数量")));
+        this.amountBox.setHint(Component.literal("全部"));
         this.amountBox.setMaxLength(4);
         this.amountBox.setValue(amountValue);
-        this.addRenderableWidget(Button.builder(Component.literal("\u53d6\u7269"), ignored -> this.sendItemRequest())
+        this.addRenderableWidget(Button.builder(Component.literal("取物"), ignored -> this.sendItemRequest())
                 .bounds(gridX + 170, gridY + 220, 50, 20)
                 .build());
-        this.addActionButton(gridX, gridY + 244, "\u7ed9\u6211\u6728\u5934", () -> this.sendTargetMessage("\u628a\u6728\u5934\u7ed9\u6211"));
-        this.addActionButton(gridX + 110, gridY + 244, "\u7ed9\u6211\u6728\u677f", () -> this.sendTargetMessage("\u628a\u6728\u677f\u7ed9\u6211"));
+        this.addActionButton(gridX, gridY + 244, "给我木头", () -> this.sendTargetMessage("把木头给我"));
+        this.addActionButton(gridX + 110, gridY + 244, "给我木板", () -> this.sendTargetMessage("把木板给我"));
 
-        this.commandBox = this.addRenderableWidget(new EditBox(this.font, 12, this.height - 42, this.width - 96, 20, Component.literal("\u8f93\u5165\u547d\u4ee4")));
+        this.commandBox = this.addRenderableWidget(new EditBox(this.font, 12, this.height - 42, this.width - 96, 20, Component.literal("输入命令")));
         this.commandBox.setMaxLength(160);
-        this.commandBox.setHint(Component.literal("\u4f8b\u5982\uff1a\u8ddf\u968f\u6211 / \u780d\u6811 / \u5efa\u9020\u907f\u96be\u6240"));
+        this.commandBox.setHint(Component.literal("例如：跟随我 / 砍树 / 建造避难所"));
         this.commandBox.setValue(commandValue);
-        this.addRenderableWidget(Button.builder(Component.literal("\u53d1\u9001"), ignored -> this.sendCustomMessage())
+        this.addRenderableWidget(Button.builder(Component.literal("发送"), ignored -> this.sendCustomMessage())
                 .bounds(this.width - 76, this.height - 42, 64, 20)
                 .build());
 

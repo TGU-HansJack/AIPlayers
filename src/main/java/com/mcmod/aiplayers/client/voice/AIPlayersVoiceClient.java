@@ -46,7 +46,7 @@ public final class AIPlayersVoiceClient {
 
     private static volatile VoiceConfig config = loadOrCreateConfig();
     private static volatile boolean recording;
-    private static volatile String lastStatus = "\u5f85\u673a";
+    private static volatile String lastStatus = "待机";
     private static volatile TargetDataLine activeLine;
     private static volatile ByteArrayOutputStream activeBuffer;
     private static volatile Thread recorderThread;
@@ -60,7 +60,7 @@ public final class AIPlayersVoiceClient {
     }
 
     public static String getStatusSummary() {
-        return "\u8bed\u97f3\uff1a" + (config.enabled ? "\u5df2\u542f\u7528" : "\u672a\u542f\u7528") + "\uff0c\u72b6\u6001\uff1a" + lastStatus;
+        return "语音：" + (config.enabled ? "已启用" : "未启用") + "，状态：" + lastStatus;
     }
 
     public static boolean isRecording() {
@@ -69,7 +69,7 @@ public final class AIPlayersVoiceClient {
 
     public static void toggleRecording(String targetName) {
         if (!config.enabled) {
-            pushClientMessage("\u8bed\u97f3\u529f\u80fd\u672a\u542f\u7528\uff0c\u8bf7\u5148\u914d\u7f6e config/aiplayers-voice.json");
+            pushClientMessage("语音功能未启用，请先配置 config/aiplayers-voice.json");
             return;
         }
         if (recording) {
@@ -107,10 +107,10 @@ public final class AIPlayersVoiceClient {
             recorderThread = new Thread(() -> captureLoop(line, buffer), "AIPlayers-VoiceRecorder");
             recorderThread.setDaemon(true);
             recorderThread.start();
-            lastStatus = "\u5f55\u97f3\u4e2d";
-            pushClientMessage("\u5df2\u5f00\u59cb\u5f55\u97f3\uff0c\u518d\u6309\u4e00\u6b21\u6309\u94ae\u7ed3\u675f\u5e76\u53d1\u9001\u3002");
+            lastStatus = "录音中";
+            pushClientMessage("已开始录音，再按一次按钮结束并发送。");
         } catch (LineUnavailableException ex) {
-            lastStatus = "\u65e0\u6cd5\u5f55\u97f3\uff1a" + ex.getMessage();
+            lastStatus = "无法录音：" + ex.getMessage();
             AIPlayersMod.LOGGER.warn("Unable to start microphone capture", ex);
             pushClientMessage(lastStatus);
         }
@@ -141,17 +141,17 @@ public final class AIPlayersVoiceClient {
             line.close();
         }
         if (buffer == null || buffer.size() == 0) {
-            lastStatus = "\u6ca1\u6709\u5f55\u5230\u58f0\u97f3";
+            lastStatus = "没有录到声音";
             pushClientMessage(lastStatus);
             return;
         }
 
         byte[] wav = encodeWav(buffer.toByteArray());
-        lastStatus = "\u8bc6\u522b\u4e2d";
-        pushClientMessage("\u6b63\u5728\u8bc6\u522b\u8bed\u97f3...");
+        lastStatus = "识别中";
+        pushClientMessage("正在识别语音...");
         transcribeAsync(wav).thenAccept(transcript -> {
             if (transcript == null || transcript.isBlank()) {
-                pushClientMessage("\u8bed\u97f3\u8bc6\u522b\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5 STT \u914d\u7f6e\u6216\u7f51\u7edc\u3002");
+                pushClientMessage("语音识别失败，请检查 STT 配置或网络。");
                 return;
             }
             Minecraft minecraft = Minecraft.getInstance();
@@ -160,7 +160,7 @@ public final class AIPlayersVoiceClient {
             minecraft.execute(() -> {
                 if (minecraft.getConnection() != null) {
                     minecraft.getConnection().sendChat(chatLine);
-                    pushClientMessage("\u5df2\u53d1\u9001\u8bed\u97f3\u547d\u4ee4\uff1a" + transcript.trim());
+                    pushClientMessage("已发送语音命令：" + transcript.trim());
                 }
             });
         });
@@ -297,7 +297,7 @@ public final class AIPlayersVoiceClient {
         try {
             JsonObject root = JsonParser.parseString(body).getAsJsonObject();
             if (root.has("text")) {
-                lastStatus = "\u8bc6\u522b\u5b8c\u6210";
+                lastStatus = "识别完成";
                 return root.get("text").getAsString();
             }
             JsonArray choices = root.getAsJsonArray("choices");
@@ -308,14 +308,14 @@ public final class AIPlayersVoiceClient {
                     JsonElement content = message.get("content");
                     String transcript = flattenMessageContent(content);
                     if (transcript != null && !transcript.isBlank()) {
-                        lastStatus = "\u8bc6\u522b\u5b8c\u6210";
+                        lastStatus = "识别完成";
                         return transcript.trim();
                     }
                 }
             }
         } catch (RuntimeException ignored) {
         }
-        lastStatus = "STT \u8fd4\u56de\u65e0\u6587\u672c";
+        lastStatus = "STT 返回无文本";
         return null;
     }
 
