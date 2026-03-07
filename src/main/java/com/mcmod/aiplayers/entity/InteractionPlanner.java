@@ -26,6 +26,12 @@ public final class InteractionPlanner {
     private static InteractionPlan buildHarvestPlan(AIPlayerEntity entity, boolean woodTask) {
         BlockPos target = entity.runtimeResolveHarvestTarget(woodTask);
         if (target == null) {
+            BlockPos searchTarget = entity.resolveRuntimeTarget("explore", entity.blockPosition());
+            if (searchTarget != null && !entity.runtimeIsWithin(searchTarget, 4.0D)) {
+                return InteractionPlan.of(woodTask ? "搜索树木交互" : "搜索矿点交互", List.of(
+                        InteractionAction.moveNear(searchTarget, 1.0D, 4.0D, woodTask ? "搜索附近树木" : "搜索附近矿点"),
+                        InteractionAction.lookAt(searchTarget, woodTask ? "观察树木线索" : "观察矿点线索")));
+            }
             return InteractionPlan.failed(woodTask ? "砍树交互" : "采矿交互", woodTask ? "未找到可采树木" : "未找到可采矿点");
         }
 
@@ -49,8 +55,15 @@ public final class InteractionPlanner {
 
     private static InteractionPlan buildShelterPlan(AIPlayerEntity entity) {
         if (!entity.runtimeHasBuildingMaterials()) {
+            BlockPos searchTarget = entity.resolveRuntimeTarget("explore", entity.blockPosition());
+            if (searchTarget != null && !entity.runtimeIsWithin(searchTarget, 4.0D)) {
+                return InteractionPlan.of("建材搜索交互", List.of(
+                        InteractionAction.moveNear(searchTarget, 1.0D, 4.0D, "搜索可用建材"),
+                        InteractionAction.lookAt(searchTarget, "观察周边可采资源")));
+            }
             return InteractionPlan.failed("建造交互", "当前建筑材料不足");
         }
+
         BlockPos placement = entity.runtimeFindNextShelterPlacement();
         if (placement == null) {
             return InteractionPlan.success("建造交互", "避难所已完成");

@@ -24,11 +24,34 @@ public final class GOAPPlanner {
         GoapPlanningState initial = GoapPlanningState.fromWorldState(state);
         SearchNode solved = solve(initial, desiredConditions, buildActionCatalog(state), state);
         if (solved != null) {
+            if (shouldUseFallback(goal, solved.actions, state)) {
+                return buildFallbackPlan(goal, state, desiredConditions);
+            }
             String reasoning = goal.reasoning() + "；目标条件=" + new GoalPlan(goal, List.of(), goal.reasoning(), goal.source(), desiredConditions).goalConditionSummary();
             return new GoalPlan(goal, solved.actions, reasoning, goal.source(), desiredConditions);
         }
 
         return buildFallbackPlan(goal, state, desiredConditions);
+    }
+
+    private static boolean shouldUseFallback(AgentGoal goal, List<PlannedAction> actions, WorldStateSnapshot state) {
+        if (goal == null) {
+            return false;
+        }
+        if (actions == null || actions.isEmpty()) {
+            return switch (goal.type()) {
+                case IDLE, TALK_ONLY, FOLLOW_OWNER -> false;
+                default -> true;
+            };
+        }
+        if (goal.type() == GoalType.EXPLORE_AREA) {
+            return actions.stream().allMatch(action -> action.type() == GoapActionType.OBSERVE_AND_REPORT);
+        }
+        if (goal.type() == GoalType.SURVIVE) {
+            boolean passiveOnly = actions.stream().allMatch(action -> action.type() == GoapActionType.OBSERVE_AND_REPORT);
+            return passiveOnly || (!state.inHazard() && !state.onFire() && !state.lowFood() && !state.night() && state.ownerAvailable() && state.ownerDistance() <= 7.0D);
+        }
+        return false;
     }
 
     private static SearchNode solve(GoapPlanningState initial, List<GoapCondition> desiredConditions, List<GoapActionDefinition> catalog, WorldStateSnapshot snapshot) {
@@ -191,21 +214,67 @@ public final class GOAPPlanner {
                 actions.add(PlannedAction.move("靠近收货玩家", "delivery_receiver", state.ownerPos(), 1.25D));
                 actions.add(PlannedAction.simple(GoapActionType.DELIVER_ITEM, "交付物资"));
             }
-            case COLLECT_WOOD -> actions.add(new PlannedAction(GoapActionType.CHOP_TREE, "砍树并回收原木", "wood", state.woodPos(), 1.08D, DEFAULT_WOOD_TARGET));
-            case COLLECT_ORE -> actions.add(new PlannedAction(GoapActionType.MINE_ORE, "前往矿点并采掘", "ore", state.orePos(), 1.05D, 1));
-            case COLLECT_FOOD -> actions.add(new PlannedAction(GoapActionType.HARVEST_CROP, "收割成熟作物", "crop", state.cropPos(), 1.0D, 1));
-            case BUILD_SHELTER -> actions.add(PlannedAction.simple(GoapActionType.BUILD_SHELTER, "按蓝图搭建避难所"));
-            case EXPLORE_AREA, TALK_ONLY, IDLE -> actions.add(PlannedAction.simple(GoapActionType.OBSERVE_AND_REPORT, "观察并汇报"));
+            case COLLECT_WOOD -> {
+                if (state.woodKnown()) {
+                    actions.add(PlannedAction.move("前往树木附近", "wood", state.woodPos(), 1.08D));
+                    actions.add(new PlannedAction(GoapActionType.CHOP_TREE, "砍树并回收原木", "wood", state.woodPos(), 1.08D, DEFAULT_WOOD_TARGET));
+                } else {
+                    actions.add(PlannedAction.move("搜索附近树木", "explore", state.ownerPos(), 1.0D));
+                    actions.add(PlannedAction.simple(GoapActionType.OBSERVE_AND_REPORT, "搜索木材线索"));
+                }
+            }
+            case COLLECT_ORE -> {
+                if (state.oreKnown()) {
+                    actions.add(PlannedAction.move("前往矿点附近", "ore", state.orePos(), 1.05D));
+                    actions.add(new PlannedAction(GoapActionType.MINE_ORE, "前往矿点并采掘", "ore", state.orePos(), 1.05D, 1));
+                } else {
+                    actions.add(PlannedAction.move("搜索附近矿点", "explore", state.ownerPos(), 1.0D));
+                    actions.add(PlannedAction.simple(GoapActionType.OBSERVE_AND_REPORT, "搜索矿点线索"));
+                }
+            }
+            case COLLECT_FOOD -> {
+                if (state.cropKnown()) {
+                    actions.add(PlannedAction.move("前往作物附近", "crop", state.cropPos(), 1.0D));
+                    actions.add(new PlannedAction(GoapActionType.HARVEST_CROP, "收割成熟作物", "crop", state.cropPos(), 1.0D, 1));
+                } else {
+                    actions.add(PlannedAction.move("搜索食物来源", "explore", state.ownerPos(), 1.0D));
+                    actions.add(PlannedAction.simple(GoapActionType.OBSERVE_AND_REPORT, "搜索食物线索"));
+                }
+            }
+            case BUILD_SHELTER -> {
+                if (state.buildingUnits() < DEFAULT_WOOD_TARGET) {
+                    if (state.woodKnown()) {
+                        actions.add(PlannedAction.move("先去补充木材", "wood", state.woodPos(), 1.08D));
+                        actions.add(new PlannedAction(GoapActionType.CHOP_TREE, "补足建材", "wood", state.woodPos(), 1.08D, DEFAULT_WOOD_TARGET));
+                    } else {
+                        actions.add(PlannedAction.move("搜索可用建材", "explore", state.ownerPos(), 1.0D));
+                        actions.add(PlannedAction.simple(GoapActionType.OBSERVE_AND_REPORT, "搜索建材线索"));
+                    }
+                } else {
+                    actions.add(PlannedAction.simple(GoapActionType.BUILD_SHELTER, "按蓝图搭建避难所"));
+                }
+            }
+            case EXPLORE_AREA -> {
+                actions.add(PlannedAction.move("前往探索区域", "explore", state.ownerPos(), 1.0D));
+                actions.add(PlannedAction.simple(GoapActionType.OBSERVE_AND_REPORT, "观察并汇报"));
+            }
+            case TALK_ONLY, IDLE -> actions.add(PlannedAction.simple(GoapActionType.OBSERVE_AND_REPORT, "观察并汇报"));
             case SURVIVE -> {
                 if (state.inHazard() || state.onFire()) {
                     actions.add(PlannedAction.simple(GoapActionType.RETREAT_TO_SAFE_GROUND, "先脱离危险环境"));
                 } else if (state.lowFood() && state.cropKnown()) {
+                    actions.add(PlannedAction.move("前往食物来源", "crop", state.cropPos(), 1.0D));
                     actions.add(new PlannedAction(GoapActionType.HARVEST_CROP, "先补充食物", "crop", state.cropPos(), 1.0D, 1));
                 } else if (state.night()) {
                     actions.add(PlannedAction.simple(GoapActionType.BUILD_SHELTER, "夜晚搭建避难所"));
                 } else if ((state.lowTools() || state.buildingUnits() < DEFAULT_WOOD_TARGET) && state.woodKnown()) {
+                    actions.add(PlannedAction.move("前往树木补充物资", "wood", state.woodPos(), 1.08D));
                     actions.add(new PlannedAction(GoapActionType.CHOP_TREE, "补足木材储备", "wood", state.woodPos(), 1.08D, DEFAULT_WOOD_TARGET));
+                } else if (state.oreKnown() && state.freeBackpackSlots() > 2) {
+                    actions.add(PlannedAction.move("前往矿点巡查", "ore", state.orePos(), 1.05D));
+                    actions.add(new PlannedAction(GoapActionType.MINE_ORE, "顺路采矿补充资源", "ore", state.orePos(), 1.05D, 1));
                 } else {
+                    actions.add(PlannedAction.move("巡视周边环境", "explore", state.ownerPos(), 1.0D));
                     actions.add(PlannedAction.simple(GoapActionType.OBSERVE_AND_REPORT, "持续更新观察与记忆"));
                 }
             }

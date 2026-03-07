@@ -3770,6 +3770,10 @@ public class AIPlayerEntity extends Zombie {
             }
         }
         boolean shelterReady = this.shelterAnchor != null && this.findNextShelterPlacement() == null;
+        BlockPos knownWood = this.rememberedLog != null ? this.rememberedLog : TeamKnowledge.findNearestResource(this, ResourceType.WOOD, this.blockPosition());
+        BlockPos knownOre = this.rememberedOre != null ? this.rememberedOre : TeamKnowledge.findNearestResource(this, ResourceType.ORE, this.blockPosition());
+        BlockPos knownCrop = this.rememberedCrop != null ? this.rememberedCrop : TeamKnowledge.findNearestResource(this, ResourceType.CROP, this.blockPosition());
+        BlockPos knownBed = this.rememberedBed != null ? this.rememberedBed : TeamKnowledge.findNearestResource(this, ResourceType.BED, this.blockPosition());
         return new WorldStateSnapshot(
                 this.safeMode(),
                 owner != null,
@@ -3782,16 +3786,16 @@ public class AIPlayerEntity extends Zombie {
                 this.isOnFire(),
                 this.stuckNavigationTicks >= NAVIGATION_STUCK_THRESHOLD / 2,
                 this.pendingDeliveryRequest != null && !this.pendingDeliveryRequest.isBlank(),
-                this.rememberedLog != null,
-                this.rememberedLog,
-                this.rememberedOre != null,
-                this.rememberedOre,
+                knownWood != null,
+                knownWood,
+                knownOre != null,
+                knownOre,
                 this.hasLowFoodSupply(),
-                this.rememberedCrop != null,
-                this.rememberedCrop,
+                knownCrop != null,
+                knownCrop,
                 this.observedDrop != null && this.observedDrop.isAlive(),
-                this.rememberedBed != null,
-                this.rememberedBed,
+                knownBed != null,
+                knownBed,
                 this.rememberedCraftingTable != null || this.rememberedFurnace != null || this.rememberedChest != null,
                 this.hasLowTools(),
                 (this.level().getDayTime() % 24000L) >= 12500L,
@@ -4128,6 +4132,14 @@ public class AIPlayerEntity extends Zombie {
                 return this.seekKnownRestSpot() ? ActionExecutionResult.RUNNING : ActionExecutionResult.FAILED;
             }
             case OBSERVE_AND_REPORT -> {
+                boolean roamingGoal = goal != null && (goal.type() == GoalType.EXPLORE_AREA || goal.type() == GoalType.SURVIVE || goal.type() == GoalType.COLLECT_WOOD || goal.type() == GoalType.COLLECT_ORE || goal.type() == GoalType.COLLECT_FOOD || goal.type() == GoalType.BUILD_SHELTER);
+                if (roamingGoal && !this.agentRuntime.movementController().isPathActive()) {
+                    BlockPos destination = this.findExplorationDestination();
+                    if (destination != null && this.navigateToPosition(destination, 1.0D)) {
+                        this.reportTaskProgress(this.activeTaskName, "主动巡视周边，扩展可执行目标");
+                        return ActionExecutionResult.RUNNING;
+                    }
+                }
                 this.scanSurroundings();
                 this.reportTaskProgress(this.activeTaskName, "观察更新：" + this.getObservationSummary());
                 return ActionExecutionResult.SUCCESS;
