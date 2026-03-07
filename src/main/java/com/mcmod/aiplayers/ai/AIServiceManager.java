@@ -6,6 +6,9 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mcmod.aiplayers.entity.AgentGoal;
+import com.mcmod.aiplayers.entity.AgentSnapshot;
+import com.mcmod.aiplayers.entity.GoalType;
 import com.mcmod.aiplayers.entity.AIPlayerEntity;
 import com.mcmod.aiplayers.system.AIAgentPlan;
 import java.io.IOException;
@@ -18,7 +21,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import net.minecraft.server.level.ServerPlayer;
@@ -29,6 +34,7 @@ public final class AIServiceManager {
     private static final String DEFAULT_PROVIDER = "qwen-compatible";
     private static final String DEFAULT_CHAT_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
     private static final String DEFAULT_CHAT_MODEL = "qwen-plus";
+    private static final String DEFAULT_PLANNER_MODE = "llm_primary";
     private static final String LEGACY_OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
     private static volatile Config config = loadOrCreateConfig();
     private static volatile String lastStatus = "本地规则模式";
@@ -44,37 +50,58 @@ public final class AIServiceManager {
         config = loadOrCreateConfig();
     }
 
-    public static boolean canUseExternalService() {
-        return config.enabled
+    public static boolean canUseConversationService() {
+        return config.conversationEnabled
                 && config.url != null
                 && !config.url.isBlank()
-                && config.model != null
-                && !config.model.isBlank();
+                && config.conversationModel != null
+                && !config.conversationModel.isBlank();
+    }
+
+    public static boolean canUseGoalPlanningService() {
+        return config.taskPlanningEnabled
+                && config.url != null
+                && !config.url.isBlank()
+                && config.goalModel != null
+                && !config.goalModel.isBlank();
+    }
+
+    public static boolean canUseExternalService() {
+        return canUseConversationService();
     }
 
     public static boolean canUseTaskPlanningService() {
-        return canUseExternalService() && config.taskAiEnabled;
+        return canUseGoalPlanningService();
+    }
+
+    public static int getReplanIntervalTicks() {
+        return Math.max(60, config.replanIntervalSeconds * 20);
     }
 
     public static int getTaskAiIntervalTicks() {
-        return Math.max(60, config.taskAiIntervalSeconds * 20);
+        return getReplanIntervalTicks();
+    }
+
+    public static String getPlannerMode() {
+        return config.plannerMode;
     }
 
     public static void setEnabled(boolean enabled) {
         Config next = config.normalize();
         next.enabled = enabled;
+        next.conversationEnabled = enabled;
         config = next;
         saveConfig(next);
-        lastStatus = enabled ? "AI接口已启用" : "AI接口已关闭";
+        lastStatus = enabled ? "AI 接口已启用" : "AI 接口已关闭";
     }
 
     public static String getStatusSummary() {
         String endpoint = config.url == null || config.url.isBlank() ? "未配置" : config.url;
-        String model = config.model == null || config.model.isBlank() ? "未配置" : config.model;
         return "AI接口：" + (config.enabled ? "已启用" : "已关闭")
                 + "；提供方：" + config.provider
-                + "；模型：" + model
-                + "；任务规划：" + (config.taskAiEnabled ? "已启用" : "已关闭")
+                + "；规划模式：" + config.plannerMode
+                + "；对话：" + (config.conversationEnabled ? config.conversationModel : "关闭")
+                + "；任务规划：" + (config.taskPlanningEnabled ? config.goalModel : "关闭")
                 + "；地址：" + endpoint
                 + "；状态：" + lastStatus;
     }
@@ -83,15 +110,14 @@ public final class AIServiceManager {
         return lastStatus;
     }
 
-    public static CompletableFuture<AITaskPlanResponse> tryPlanTaskAsync(AIPlayerEntity companion, AIAgentPlan localPlan) {
-        if (!canUseTaskPlanningService()) {
+    public static CompletableFuture<AIGoalPlanResponse> tryPlanGoalAsync(AIPlayerEntity companion, AgentSnapshot snapshot, AgentGoal localGoal) {
+        if (!canUseGoalPlanningService()) {
             return CompletableFuture.completedFuture(null);
         }
-
         try {
             HttpClient client = createClient();
-            HttpRequest request = buildTaskPlanningRequest(companion, localPlan);
-            lastStatus = "任务规划请求中";
+            HttpRequest request = buildGoalPlanningRequest(companion, snapshot, localGoal);
+            lastStatus = "任务目标规划请求中";
             return client.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
                     .handle((response, throwable) -> {
                         if (throwable != null) {
@@ -101,7 +127,7 @@ public final class AIServiceManager {
                             lastStatus = cause.getClass().getSimpleName() + ": " + cause.getMessage();
                             return null;
                         }
-                        return parseTaskPlanHttpResponse(response);
+                        return parseGoalPlanHttpResponse(response);
                     });
         } catch (IllegalArgumentException ex) {
             lastStatus = ex.getClass().getSimpleName() + ": " + ex.getMessage();
@@ -109,18 +135,34 @@ public final class AIServiceManager {
         }
     }
 
+    public static CompletableFuture<AITaskPlanResponse> tryPlanTaskAsync(AIPlayerEntity companion, AIAgentPlan localPlan) {
+        AgentGoal goal = AgentGoal.of(GoalType.fromLegacyText(localPlan == null ? "survive" : localPlan.recommendedMode().commandName()), "legacy", localPlan == null ? "旧版兼容" : localPlan.goal());
+        AgentSnapshot snapshot = companion.getAgentRuntimeSnapshot();
+        return tryPlanGoalAsync(companion, snapshot, goal).thenApply(response -> {
+            if (response == null || !response.hasPlan()) {
+                return null;
+            }
+            GoalType resolved = response.resolveGoalType(goal.type());
+            return new AITaskPlanResponse(
+                    response.speechReply().isBlank() ? resolved.displayName() : response.speechReply(),
+                    resolved.coarseMode().commandName(),
+                    response.constraints(),
+                    response.fallbackGoal().isBlank() ? "回退到本地规划" : response.fallbackGoal(),
+                    response.source());
+        });
+    }
+
     public static AIServiceResponse tryRespond(AIPlayerEntity companion, ServerPlayer speaker, String message) {
-        if (!canUseExternalService()) {
-            lastStatus = config.enabled ? "AI接口配置不完整" : "本地规则模式";
+        if (!canUseConversationService()) {
+            lastStatus = config.enabled ? "AI 接口配置不完整" : "本地规则模式";
             return null;
         }
-
         try {
             HttpClient client = createClient();
-            HttpRequest request = buildRequest(companion, speaker, message);
-            lastStatus = "请求中";
+            HttpRequest request = buildConversationRequest(companion, speaker, message);
+            lastStatus = "对话请求中";
             HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            return parseHttpResponse(response);
+            return parseConversationHttpResponse(response);
         } catch (IOException | InterruptedException | IllegalArgumentException ex) {
             if (ex instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
@@ -131,15 +173,14 @@ public final class AIServiceManager {
     }
 
     public static CompletableFuture<AIServiceResponse> tryRespondAsync(AIPlayerEntity companion, ServerPlayer speaker, String message) {
-        if (!canUseExternalService()) {
-            lastStatus = config.enabled ? "AI接口配置不完整" : "本地规则模式";
+        if (!canUseConversationService()) {
+            lastStatus = config.enabled ? "AI 接口配置不完整" : "本地规则模式";
             return CompletableFuture.completedFuture(null);
         }
-
         try {
             HttpClient client = createClient();
-            HttpRequest request = buildRequest(companion, speaker, message);
-            lastStatus = "请求中";
+            HttpRequest request = buildConversationRequest(companion, speaker, message);
+            lastStatus = "对话请求中";
             return client.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
                     .handle((response, throwable) -> {
                         if (throwable != null) {
@@ -149,7 +190,7 @@ public final class AIServiceManager {
                             lastStatus = cause.getClass().getSimpleName() + ": " + cause.getMessage();
                             return null;
                         }
-                        return parseHttpResponse(response);
+                        return parseConversationHttpResponse(response);
                     });
         } catch (IllegalArgumentException ex) {
             lastStatus = ex.getClass().getSimpleName() + ": " + ex.getMessage();
@@ -163,157 +204,152 @@ public final class AIServiceManager {
                 .build();
     }
 
-    private static HttpRequest buildRequest(AIPlayerEntity companion, ServerPlayer speaker, String message) {
+    private static HttpRequest buildConversationRequest(AIPlayerEntity companion, ServerPlayer speaker, String message) {
         JsonObject root = new JsonObject();
-        root.addProperty("model", config.model);
+        root.addProperty("model", config.conversationModel);
         root.addProperty("temperature", 0.4D);
-
         JsonArray messages = new JsonArray();
         JsonObject system = new JsonObject();
         system.addProperty("role", "system");
-        system.addProperty("content", buildSystemPrompt());
+        system.addProperty("content", buildConversationSystemPrompt());
         messages.add(system);
-
         JsonObject user = new JsonObject();
         user.addProperty("role", "user");
-        user.addProperty("content", buildUserPrompt(companion, speaker, message));
+        user.addProperty("content", buildConversationUserPrompt(companion, speaker, message));
         messages.add(user);
-
         root.add("messages", messages);
-
-        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(config.url))
-                .timeout(Duration.ofMillis(Math.max(1000, config.timeoutMs)))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(root), StandardCharsets.UTF_8));
-
-        if (config.apiKey != null && !config.apiKey.isBlank()) {
-            builder.header("Authorization", "Bearer " + config.apiKey);
-        }
-
-        return builder.build();
+        return createRequest(root);
     }
 
-    private static HttpRequest buildTaskPlanningRequest(AIPlayerEntity companion, AIAgentPlan localPlan) {
+    private static HttpRequest buildGoalPlanningRequest(AIPlayerEntity companion, AgentSnapshot snapshot, AgentGoal localGoal) {
         JsonObject root = new JsonObject();
-        root.addProperty("model", config.model);
+        root.addProperty("model", config.goalModel);
         root.addProperty("temperature", 0.2D);
-
         JsonArray messages = new JsonArray();
         JsonObject system = new JsonObject();
         system.addProperty("role", "system");
-        system.addProperty("content", buildTaskPlanningSystemPrompt());
+        system.addProperty("content", buildGoalPlanningSystemPrompt());
         messages.add(system);
-
         JsonObject user = new JsonObject();
         user.addProperty("role", "user");
-        user.addProperty("content", buildTaskPlanningUserPrompt(companion, localPlan));
+        user.addProperty("content", buildGoalPlanningUserPrompt(companion, snapshot, localGoal));
         messages.add(user);
         root.add("messages", messages);
+        return createRequest(root);
+    }
 
+    private static HttpRequest createRequest(JsonObject root) {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(config.url))
                 .timeout(Duration.ofMillis(Math.max(1000, config.timeoutMs)))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(root), StandardCharsets.UTF_8));
-
         if (config.apiKey != null && !config.apiKey.isBlank()) {
             builder.header("Authorization", "Bearer " + config.apiKey);
         }
-
         return builder.build();
     }
 
-    private static String buildSystemPrompt() {
+    private static String buildConversationSystemPrompt() {
         return "你是 Minecraft 模组中的 AI 玩家同伴。"
-                + "请只返回 JSON，对象字段为 reply、mode、action。"
+                + "请只返回 JSON，对象字段为 reply、goalType、goalArgs、action。"
                 + "reply 是对玩家的简短中文回复。"
-                + "mode 可选：unchanged,idle,follow,guard,gather_wood,mine,explore,build_shelter,survive。"
-                + "action 可选：none,jump,crouch,stand,look_up,look_down,look_owner。"
-                + "你必须结合环境感知、当前规划、近期记忆来理解玩家意图。"
-                + "如果只是聊天，请把 mode 设为 unchanged，action 设为 none。"
+                + "goalType 可选：idle,follow_owner,guard_owner,survive,collect_wood,collect_ore,collect_food,build_shelter,deliver_item,explore_area,recover_self,talk_only。"
+                + "goalArgs 是字符串键值对象；action 可选：none,jump,crouch,stand,look_up,look_down,look_owner。"
+                + "如果只是聊天，请把 goalType 设为空字符串，action 设为 none。"
                 + "不要虚构不存在的物品、地点和能力。";
     }
 
-    private static String buildTaskPlanningSystemPrompt() {
-        return "你是 Minecraft AI 同伴的高层任务规划器。"
-                + "请只返回 JSON，对象字段必须为 goal、mode、subtasks、fallback。"
-                + "goal 是当前最值得执行的高层目标。"
-                + "mode 必须从 unchanged,idle,follow,guard,gather_wood,mine,explore,build_shelter,survive 中选择。"
-                + "subtasks 是 2 到 5 条的字符串数组，表示本地执行器应该按什么顺序尝试。"
-                + "fallback 是当当前计划连续失败时的回退策略。"
-                + "你只能规划高层目标，不能假设拥有未实现的能力。"
-                + "请充分利用环境、记忆、失败反馈、背包和本地规划候选。";
+    private static String buildGoalPlanningSystemPrompt() {
+        return "你是 Minecraft AI 同伴的高层目标规划器。"
+                + "请只返回 JSON，对象字段必须为 goalType、goalArgs、priority、constraints、fallbackGoal、speechReply。"
+                + "goalType 只能从 idle,follow_owner,guard_owner,survive,collect_wood,collect_ore,collect_food,build_shelter,deliver_item,explore_area,recover_self,talk_only 中选择。"
+                + "goalArgs 是字符串对象；priority 是 0 到 100 的整数；constraints 是字符串数组。"
+                + "fallbackGoal 是回退目标；speechReply 是给玩家的简短中文解释。"
+                + "你只能做高层目标选择，不能假设拥有未实现的能力。";
     }
 
-    private static String buildUserPrompt(AIPlayerEntity companion, ServerPlayer speaker, String message) {
+    private static String buildConversationUserPrompt(AIPlayerEntity companion, ServerPlayer speaker, String message) {
         return "玩家消息：" + message + "\n"
                 + "玩家名：" + speaker.getName().getString() + "\n"
                 + "AI 名称：" + companion.getAIName() + "\n"
-                + "当前模式：" + companion.getMode().commandName() + "\n"
-                + "认知摘要：" + companion.getCognitiveSummary() + "\n"
-                + "当前规划：" + companion.getPlanSummary() + "\n"
                 + "状态摘要：" + companion.getStatusSummary() + "\n"
-                + "长期记忆：" + companion.getLongTermMemorySummary() + "\n"
-                + "记忆摘要：" + companion.getMemorySummary();
+                + "观察摘要：" + companion.getObservationSummary() + "\n"
+                + "计划摘要：" + companion.getPlanSummary() + "\n"
+                + "长期记忆：" + companion.getLongTermMemorySummary();
     }
 
-    private static String buildTaskPlanningUserPrompt(AIPlayerEntity companion, AIAgentPlan localPlan) {
+    private static String buildGoalPlanningUserPrompt(AIPlayerEntity companion, AgentSnapshot snapshot, AgentGoal localGoal) {
+        WorldSummary summary = WorldSummary.from(snapshot);
         return "AI 名称：" + companion.getAIName() + "\n"
-                + "当前模式：" + companion.getMode().commandName() + "\n"
-                + "观察：" + companion.getObservationSummary() + "\n"
-                + "认知：" + companion.getCognitiveSummary() + "\n"
-                + "状态：" + companion.getStatusSummary() + "\n"
-                + "短期记忆：" + companion.getMemorySummary() + "\n"
-                + "长期记忆：" + companion.getLongTermMemorySummary() + "\n"
-                + "任务反馈：" + companion.getTaskFeedbackSummary() + "\n"
-                + "本地候选目标：" + localPlan.goal() + "\n"
-                + "本地候选模式：" + (localPlan.recommendedMode() == null ? "unchanged" : localPlan.recommendedMode().commandName()) + "\n"
-                + "本地候选步骤：" + String.join(" -> ", localPlan.steps());
+                + "本地目标：" + localGoal.type().commandName() + "\n"
+                + "当前目标：" + snapshot.currentGoal().type().commandName() + "\n"
+                + "当前动作：" + snapshot.currentAction() + "\n"
+                + "路径状态：" + snapshot.pathStatus() + "\n"
+                + "主人可用：" + summary.ownerAvailable + "\n"
+                + "主人距离：" + summary.ownerDistance + "\n"
+                + "危险：" + summary.inHazard + "\n"
+                + "食物偏低：" + summary.lowFood + "\n"
+                + "工具偏低：" + summary.lowTools + "\n"
+                + "夜晚：" + summary.night + "\n"
+                + "建材单位：" + summary.buildingUnits + "\n"
+                + "观察：" + summary.observation + "\n"
+                + "背包：" + summary.inventory + "\n"
+                + "最近失败：" + snapshot.memory().lastFailure() + "\n"
+                + "最近学习：" + snapshot.memory().lastLearning() + "\n"
+                + "团队知识：" + TeamSummary.safe(companion);
     }
 
-    private static AIServiceResponse parseHttpResponse(HttpResponse<String> response) {
-        if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            lastStatus = "HTTP " + response.statusCode();
+    private static AIServiceResponse parseConversationHttpResponse(HttpResponse<String> response) {
+        if (response == null || response.statusCode() < 200 || response.statusCode() >= 300) {
+            lastStatus = "HTTP " + (response == null ? "null" : response.statusCode());
             return null;
         }
-
-        AIServiceResponse parsed = parseResponse(response.body());
-        lastStatus = parsed != null ? "最近一次调用成功" : "响应解析失败";
+        AIServiceResponse parsed = parseConversationResponse(response.body());
+        lastStatus = parsed != null ? "最近一次对话调用成功" : "对话响应解析失败";
         return parsed;
     }
 
-    private static AITaskPlanResponse parseTaskPlanHttpResponse(HttpResponse<String> response) {
-        if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            lastStatus = "HTTP " + response.statusCode();
+    private static AIGoalPlanResponse parseGoalPlanHttpResponse(HttpResponse<String> response) {
+        if (response == null || response.statusCode() < 200 || response.statusCode() >= 300) {
+            lastStatus = "HTTP " + (response == null ? "null" : response.statusCode());
             return null;
         }
-        AITaskPlanResponse parsed = parseTaskPlanResponse(response.body());
-        lastStatus = parsed != null ? "最近一次任务规划成功" : "任务规划解析失败";
+        AIGoalPlanResponse parsed = parseGoalPlanResponse(response.body());
+        lastStatus = parsed != null ? "最近一次目标规划成功" : "目标规划解析失败";
         return parsed;
     }
 
-    private static AIServiceResponse parseResponse(String body) {
+    private static AIServiceResponse parseConversationResponse(String body) {
         try {
-            JsonElement rootElement = JsonParser.parseString(body);
-            if (rootElement.isJsonObject()) {
-                JsonObject root = rootElement.getAsJsonObject();
-                String directReply = getString(root, "reply");
-                if (directReply != null) {
-                    return new AIServiceResponse(
-                            directReply,
-                            defaultString(getString(root, "mode"), "unchanged"),
-                            defaultString(getString(root, "action"), "none"),
-                            "api");
+            JsonObject root = JsonParser.parseString(body).getAsJsonObject();
+            JsonArray choices = root.getAsJsonArray("choices");
+            if (choices != null && !choices.isEmpty()) {
+                JsonObject choice = choices.get(0).getAsJsonObject();
+                JsonObject message = choice.getAsJsonObject("message");
+                if (message != null) {
+                    String content = getString(message, "content");
+                    if (content != null && !content.isBlank()) {
+                        return parseAssistantContent(content);
+                    }
                 }
+            }
+        } catch (RuntimeException ignored) {
+        }
+        return null;
+    }
 
-                JsonArray choices = root.getAsJsonArray("choices");
-                if (choices != null && !choices.isEmpty()) {
-                    JsonObject choice = choices.get(0).getAsJsonObject();
-                    JsonObject message = choice.getAsJsonObject("message");
-                    if (message != null) {
-                        String content = getString(message, "content");
-                        if (content != null && !content.isBlank()) {
-                            return parseAssistantContent(content);
-                        }
+    private static AIGoalPlanResponse parseGoalPlanResponse(String body) {
+        try {
+            JsonObject root = JsonParser.parseString(body).getAsJsonObject();
+            JsonArray choices = root.getAsJsonArray("choices");
+            if (choices != null && !choices.isEmpty()) {
+                JsonObject choice = choices.get(0).getAsJsonObject();
+                JsonObject message = choice.getAsJsonObject("message");
+                if (message != null) {
+                    String content = getString(message, "content");
+                    if (content != null && !content.isBlank()) {
+                        JsonObject object = JsonParser.parseString(content).getAsJsonObject();
+                        return parseGoalPlanObject(object);
                     }
                 }
             }
@@ -326,64 +362,72 @@ public final class AIServiceManager {
         try {
             JsonObject object = JsonParser.parseString(content).getAsJsonObject();
             return new AIServiceResponse(
-                    defaultString(getString(object, "reply"), content),
+                    defaultString(getString(object, "reply"), ""),
                     defaultString(getString(object, "mode"), "unchanged"),
+                    defaultString(getString(object, "goalType"), ""),
+                    parseStringMap(object.getAsJsonObject("goalArgs")),
                     defaultString(getString(object, "action"), "none"),
                     "api");
-        } catch (RuntimeException ignored) {
-            return new AIServiceResponse(content, "unchanged", "none", "api");
+        } catch (RuntimeException ex) {
+            return new AIServiceResponse(content, "unchanged", "", Map.of(), "none", "api");
         }
     }
 
-    private static AITaskPlanResponse parseTaskPlanResponse(String body) {
-        try {
-            JsonElement rootElement = JsonParser.parseString(body);
-            if (rootElement.isJsonObject()) {
-                JsonObject root = rootElement.getAsJsonObject();
-                if (root.has("goal") || root.has("subtasks") || root.has("fallback")) {
-                    return parseTaskPlanObject(root);
-                }
-
-                JsonArray choices = root.getAsJsonArray("choices");
-                if (choices != null && !choices.isEmpty()) {
-                    JsonObject choice = choices.get(0).getAsJsonObject();
-                    JsonObject message = choice.getAsJsonObject("message");
-                    if (message != null) {
-                        String content = getString(message, "content");
-                        if (content != null && !content.isBlank()) {
-                            JsonObject object = JsonParser.parseString(content).getAsJsonObject();
-                            return parseTaskPlanObject(object);
-                        }
-                    }
-                }
-            }
-        } catch (RuntimeException ignored) {
+    private static AIGoalPlanResponse parseGoalPlanObject(JsonObject object) {
+        if (object == null) {
+            return null;
         }
-        return null;
-    }
-
-    private static AITaskPlanResponse parseTaskPlanObject(JsonObject object) {
-        List<String> subtasks = new ArrayList<>();
-        JsonArray array = object.getAsJsonArray("subtasks");
+        List<String> constraints = new ArrayList<>();
+        JsonArray array = object.getAsJsonArray("constraints");
         if (array != null) {
             for (JsonElement element : array) {
                 if (element != null && !element.isJsonNull()) {
                     String value = element.getAsString();
                     if (value != null && !value.isBlank()) {
-                        subtasks.add(value.trim());
+                        constraints.add(value.trim());
                     }
                 }
             }
         }
-        return new AITaskPlanResponse(
-                defaultString(getString(object, "goal"), ""),
-                defaultString(getString(object, "mode"), "unchanged"),
-                List.copyOf(subtasks),
-                defaultString(getString(object, "fallback"), "回退到本地规划"),
-                "task-api");
+        String goalType = defaultString(getString(object, "goalType"), "");
+        if (goalType.isBlank()) {
+            goalType = defaultString(getString(object, "mode"), defaultString(getString(object, "goal"), ""));
+        }
+        return new AIGoalPlanResponse(
+                goalType,
+                parseStringMap(object.getAsJsonObject("goalArgs")),
+                parseInt(object.get("priority"), 60),
+                constraints,
+                defaultString(getString(object, "fallbackGoal"), defaultString(getString(object, "fallback"), "survive")),
+                defaultString(getString(object, "speechReply"), defaultString(getString(object, "goal"), "")),
+                "goal-api");
+    }
+
+    private static Map<String, String> parseStringMap(JsonObject object) {
+        if (object == null) {
+            return Map.of();
+        }
+        Map<String, String> values = new LinkedHashMap<>();
+        for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
+            if (entry.getValue() != null && !entry.getValue().isJsonNull()) {
+                values.put(entry.getKey(), entry.getValue().getAsString());
+            }
+        }
+        return values;
+    }
+
+    private static int parseInt(JsonElement element, int fallback) {
+        try {
+            return element == null || element.isJsonNull() ? fallback : element.getAsInt();
+        } catch (RuntimeException ex) {
+            return fallback;
+        }
     }
 
     private static String getString(JsonObject object, String key) {
+        if (object == null) {
+            return null;
+        }
         JsonElement element = object.get(key);
         return element == null || element.isJsonNull() ? null : element.getAsString();
     }
@@ -401,11 +445,9 @@ public final class AIServiceManager {
                 lastStatus = "已生成默认配置文件：" + CONFIG_PATH;
                 return template;
             }
-
             String content = Files.readString(CONFIG_PATH, StandardCharsets.UTF_8);
             Config loaded = GSON.fromJson(content, Config.class);
             if (loaded == null) {
-                lastStatus = "?????????????";
                 return Config.createDefault();
             }
             Config normalized = loaded.normalize();
@@ -437,6 +479,13 @@ public final class AIServiceManager {
         private String apiKey;
         private String model;
         private int timeoutMs;
+        private String plannerMode;
+        private boolean conversationEnabled;
+        private boolean taskPlanningEnabled;
+        private String conversationModel;
+        private String goalModel;
+        private int replanIntervalSeconds;
+        private int maxRetries;
 
         private static Config createDefault() {
             Config config = new Config();
@@ -448,6 +497,13 @@ public final class AIServiceManager {
             config.apiKey = "";
             config.model = DEFAULT_CHAT_MODEL;
             config.timeoutMs = 8000;
+            config.plannerMode = DEFAULT_PLANNER_MODE;
+            config.conversationEnabled = false;
+            config.taskPlanningEnabled = false;
+            config.conversationModel = DEFAULT_CHAT_MODEL;
+            config.goalModel = DEFAULT_CHAT_MODEL;
+            config.replanIntervalSeconds = 5;
+            config.maxRetries = 2;
             return config;
         }
 
@@ -470,7 +526,49 @@ public final class AIServiceManager {
             if (this.taskAiIntervalSeconds <= 0) {
                 this.taskAiIntervalSeconds = 5;
             }
+            if (this.plannerMode == null || this.plannerMode.isBlank()) {
+                this.plannerMode = DEFAULT_PLANNER_MODE;
+            }
+            if (this.conversationModel == null || this.conversationModel.isBlank()) {
+                this.conversationModel = this.model;
+            }
+            if (this.goalModel == null || this.goalModel.isBlank()) {
+                this.goalModel = this.model;
+            }
+            if (this.replanIntervalSeconds <= 0) {
+                this.replanIntervalSeconds = this.taskAiIntervalSeconds > 0 ? this.taskAiIntervalSeconds : 5;
+            }
+            if (this.maxRetries <= 0) {
+                this.maxRetries = 2;
+            }
+            if (!this.conversationEnabled && this.enabled) {
+                this.conversationEnabled = true;
+            }
+            if (!this.taskPlanningEnabled && this.taskAiEnabled) {
+                this.taskPlanningEnabled = true;
+            }
             return this;
+        }
+    }
+
+    private record WorldSummary(boolean ownerAvailable, double ownerDistance, boolean inHazard, boolean lowFood, boolean lowTools, boolean night, int buildingUnits, String observation, String inventory) {
+        private static WorldSummary from(AgentSnapshot snapshot) {
+            return new WorldSummary(
+                    snapshot.worldState().ownerAvailable(),
+                    snapshot.worldState().ownerDistance(),
+                    snapshot.worldState().inHazard(),
+                    snapshot.worldState().lowFood(),
+                    snapshot.worldState().lowTools(),
+                    snapshot.worldState().night(),
+                    snapshot.worldState().buildingUnits(),
+                    snapshot.worldState().observation(),
+                    snapshot.worldState().inventory());
+        }
+    }
+
+    private static final class TeamSummary {
+        private static String safe(AIPlayerEntity entity) {
+            return entity.getLongTermMemorySummary();
         }
     }
 }

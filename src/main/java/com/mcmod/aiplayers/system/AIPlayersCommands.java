@@ -2,6 +2,7 @@ package com.mcmod.aiplayers.system;
 
 import com.mcmod.aiplayers.ai.AIServiceManager;
 import com.mcmod.aiplayers.entity.AIPlayerAction;
+import com.mcmod.aiplayers.entity.AgentConfigManager;
 import com.mcmod.aiplayers.entity.AIPlayerEntity;
 import com.mcmod.aiplayers.entity.AIPlayerMode;
 import com.mcmod.aiplayers.system.BlueprintRegistry;
@@ -102,10 +103,7 @@ public final class AIPlayersCommands {
             if (commander != null && !companion.canReceiveOrdersFrom(commander)) {
                 continue;
             }
-            if (commander != null) {
-                companion.assignOwner(commander);
-            }
-            companion.setMode(mode);
+            companion.applyCommandedMode(commander, mode);
             updated++;
         }
 

@@ -1,0 +1,41 @@
+package com.mcmod.aiplayers.entity;
+
+import net.minecraft.core.BlockPos;
+
+public record WorldStateSnapshot(
+        AIPlayerMode coarseMode,
+        boolean ownerAvailable,
+        BlockPos ownerPos,
+        double ownerDistance,
+        boolean ownerUnderThreat,
+        boolean hostileNearby,
+        boolean lowHealth,
+        boolean inHazard,
+        boolean onFire,
+        boolean navigationStuck,
+        boolean pendingDelivery,
+        boolean woodKnown,
+        BlockPos woodPos,
+        boolean oreKnown,
+        BlockPos orePos,
+        boolean lowFood,
+        boolean cropKnown,
+        BlockPos cropPos,
+        boolean dropNearby,
+        boolean bedKnown,
+        BlockPos bedPos,
+        boolean utilitiesKnown,
+        boolean lowTools,
+        boolean night,
+        int buildingUnits,
+        int usedBackpackSlots,
+        int freeBackpackSlots,
+        int breadCount,
+        int plankCount,
+        int logCount,
+        int torchCount,
+        String observation,
+        String inventory,
+        String lastFeedback,
+        String cognition) {
+}

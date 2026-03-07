@@ -295,29 +295,42 @@ config/aiplayers-api.json
   "apiKey": "",
   "model": "qwen-plus",
   "timeoutMs": 8000,
+  "plannerMode": "llm_primary",
+  "conversationEnabled": false,
+  "taskPlanningEnabled": false,
+  "conversationModel": "qwen-plus",
+  "goalModel": "qwen-plus",
+  "replanIntervalSeconds": 8,
+  "maxRetries": 2,
   "taskAiEnabled": false,
-  "taskAiIntervalSeconds": 5
+  "taskAiIntervalSeconds": 8
 }
 ```
 
 ### 字段说明
 
-- `enabled`：是否启用外部大模型对话
+- `enabled`：兼容旧版的总开关，会联动对话开关
 - `provider`：当前默认提供方标记
-- `url`：千问 OpenAI 兼容聊天接口地址
+- `url`：千问 / OpenAI 兼容聊天接口地址
 - `apiKey`：阿里云百炼 / DashScope API Key
-- `model`：默认模型，当前为 `qwen-plus`
+- `model`：兼容旧版字段；缺省时会同步到 `conversationModel` 和 `goalModel`
+- `plannerMode`：`llm_primary | hybrid | local_only`，决定高层目标是否优先走 LLM
+- `conversationEnabled`：是否启用自由对话 LLM
+- `taskPlanningEnabled`：是否启用高层目标重规划
+- `conversationModel`：聊天回复模型
+- `goalModel`：目标规划模型
+- `replanIntervalSeconds`：LLM 高层重规划间隔秒数
 - `timeoutMs`：请求超时毫秒数
-- `taskAiEnabled`：是否启用任务规划型 Hybrid Agent。开启后，AI 会周期性把世界状态、记忆、背包与失败反馈发给 LLM 做高层重规划
-- `taskAiIntervalSeconds`：任务规划轮询间隔秒数，默认 `5`。值越小，重规划越及时，但会增加 API 调用频率
+- `maxRetries`：失败重试次数
+- `taskAiEnabled` / `taskAiIntervalSeconds`：旧字段兼容别名，会自动映射到新的任务规划配置
 
 ### 对话 AI 与任务 AI
 
-- `enabled=true`：启用外部大模型聊天链路，玩家自由对话会走 LLM 回复
-- `taskAiEnabled=true`：启用 Hybrid Agent 任务规划链路，`runAgentPipeline()` 会周期性发送当前世界状态、本地候选计划、长期记忆与最近失败反馈给 LLM
-- 任务 AI 返回的结构为：`goal`、`mode`、`subtasks`、`fallback`
-- 本地执行器仍负责真正落地：寻路、砍树、挖矿、建造、战斗、交付、脱困
-- 当高层计划连续失败时，会自动触发 `fallback`，回退到更稳定的本地执行模式
+- `conversationEnabled=true`：启用外部大模型聊天链路，玩家自由对话会走 LLM 回复
+- `taskPlanningEnabled=true`：启用 Hybrid Agent 目标规划链路，`AgentRuntime` 会周期性发送世界状态、记忆、背包与失败摘要给 LLM
+- 任务规划返回结构固定为：`goalType`、`goalArgs`、`priority`、`constraints`、`fallbackGoal`、`speechReply`
+- 本地 GOAP / 执行器仍负责真正落地：寻路、砍树、挖矿、建造、战斗、交付、脱困
+- 当 LLM 不可用、403、超时或返回非法 JSON 时，会回退到本地 `GoalSelector`，不会清空当前进度
 
 ### 推荐模型
 

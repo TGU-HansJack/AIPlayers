@@ -2,6 +2,7 @@ package com.mcmod.aiplayers;
 
 import com.mcmod.aiplayers.ai.AIServiceManager;
 import com.mcmod.aiplayers.client.AIPlayersClient;
+import com.mcmod.aiplayers.entity.AgentConfigManager;
 import com.mcmod.aiplayers.registry.ModEntities;
 import com.mcmod.aiplayers.system.AIPlayersChatHandler;
 import com.mcmod.aiplayers.system.AIPlayersCommands;
@@ -24,6 +25,7 @@ public class AIPlayersMod {
         var modBusGroup = context.getModBusGroup();
 
         AIServiceManager.initialize();
+        AgentConfigManager.initialize();
         ModEntities.ENTITY_TYPES.register(modBusGroup);
         EntityAttributeCreationEvent.BUS.addListener(ModEntities::registerAttributes);
 
