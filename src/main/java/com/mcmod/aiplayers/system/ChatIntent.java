@@ -5,6 +5,7 @@ public enum ChatIntent {
     HELP,
     STATUS,
     INVENTORY,
+    GIVE_ITEM,
     MEMORY,
     PLAN,
     FOLLOW,

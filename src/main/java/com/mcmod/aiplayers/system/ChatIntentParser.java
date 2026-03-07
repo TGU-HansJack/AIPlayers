@@ -31,6 +31,11 @@ public final class ChatIntentParser {
         if (containsAny(normalized, "状态", "情况", "看到了什么", "看见什么", "status", "report", "what do you see", "what can you see")) {
             return ChatIntent.STATUS;
         }
+        if ((containsAny(normalized, "给我", "交给我", "给一下", "拿给我", "递给我", "give me", "bring me")
+                && containsAny(normalized, "木头", "原木", "木板", "圆石", "面包", "煤", "铁", "石镐", "斧头", "物品", "库存", "log", "wood", "plank", "cobble", "bread", "coal", "iron", "pickaxe", "axe"))
+                || containsAny(normalized, "把木头给我", "把原木给我", "把木板给我", "把圆石给我", "把面包给我")) {
+            return ChatIntent.GIVE_ITEM;
+        }
         if (containsAny(normalized, "跟随", "跟着", "follow", "come with me")) {
             return ChatIntent.FOLLOW;
         }

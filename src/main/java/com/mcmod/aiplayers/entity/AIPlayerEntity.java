@@ -14,6 +14,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -29,6 +32,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
@@ -64,9 +68,13 @@ public class AIPlayerEntity extends Zombie {
     private static final EntityDataAccessor<String> DATA_OWNER_ID = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<String> DATA_MODE = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<String> DATA_BLUEPRINT = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<String> DATA_STATUS = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<String> DATA_OBSERVATION = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
+    private static final EntityDataAccessor<String> DATA_INVENTORY = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
     private static final String DEFAULT_AI_NAME = "Companion";
     private static final String DEFAULT_OBSERVATION = "All clear.";
     private static final String DEFAULT_BLUEPRINT_ID = "shelter";
+    private static final Pattern NUMBER_PATTERN = Pattern.compile("(\\d+)");
     private static final int BACKPACK_SIZE = 27;
     private static final int SCAN_RADIUS = 12;
     private static final int SCAN_VERTICAL_DOWN = 6;
@@ -104,6 +112,8 @@ public class AIPlayerEntity extends Zombie {
     private Vec3 lastNavigationSample = Vec3.ZERO;
     private int stuckNavigationTicks;
     private String activeBlueprintId = DEFAULT_BLUEPRINT_ID;
+    private UUID pendingDeliveryReceiverId;
+    private String pendingDeliveryRequest;
 
     public AIPlayerEntity(EntityType<? extends Zombie> entityType, Level level) {
         super(entityType, level);
@@ -121,6 +131,9 @@ public class AIPlayerEntity extends Zombie {
         builder.define(DATA_OWNER_ID, "");
         builder.define(DATA_MODE, AIPlayerMode.IDLE.commandName());
         builder.define(DATA_BLUEPRINT, DEFAULT_BLUEPRINT_ID);
+        builder.define(DATA_STATUS, "模式：待命 | 生命：20/20 | 背包：0/27");
+        builder.define(DATA_OBSERVATION, "周围一切正常。");
+        builder.define(DATA_INVENTORY, "空");
     }
 
     public static AttributeSupplier.Builder createAttributes() {
@@ -162,6 +175,10 @@ public class AIPlayerEntity extends Zombie {
         this.tickActionState();
         this.tickNavigationState();
         this.runModeLogic();
+
+        if (this.tickCount % 10 == 0) {
+            this.syncClientTelemetry();
+        }
 
         if (this.persistentStateDirty) {
             this.syncPersistentState();
@@ -220,6 +237,9 @@ public class AIPlayerEntity extends Zombie {
 
         this.remember("对话", speaker.getName().getString() + "：" + content);
         ChatIntent intent = ChatIntentParser.parse(content);
+        if (intent == ChatIntent.GIVE_ITEM) {
+            return this.handleDeliveryRequest(speaker, content);
+        }
         if (intent != ChatIntent.UNKNOWN) {
             return this.executeIntent(speaker, intent);
         }
@@ -271,13 +291,16 @@ public class AIPlayerEntity extends Zombie {
                 return "你好，我已就绪。" + this.getObservationSummary();
             }
             case HELP -> {
-                return "你可以让我跟随、护卫、砍树、挖矿、探索、建造、生存，也可以让我跳跃、下蹲、抬头、查看背包、脱困、查看记忆或询问当前计划。";
+                return "你可以让我跟随、护卫、砍树、挖矿、探索、建造、生存，也可以让我跳跃、下蹲、抬头、查看背包、把木头给你、脱困、查看记忆或询问当前计划。";
             }
             case STATUS -> {
                 return this.getStatusSummary();
             }
             case INVENTORY -> {
                 return "当前背包：" + this.getDetailedInventorySummary();
+            }
+            case GIVE_ITEM -> {
+                return "你可以直接说：把木头给我、给我 16 个原木、把圆石给我。";
             }
             case MEMORY -> {
                 return "最近记忆：" + this.getMemorySummary();
@@ -346,7 +369,7 @@ public class AIPlayerEntity extends Zombie {
                 return "已停止当前任务，进入待命。";
             }
             case UNKNOWN -> {
-                return "我听到了，但没完全理解。你可以说：跟随、护卫、砍树、挖矿、探索、建造、生存、跳跃、下蹲、抬头、背包、脱困、记忆、状态、计划、停止。";
+                return "我听到了，但没完全理解。你可以说：跟随、护卫、砍树、挖矿、探索、建造、生存、跳跃、下蹲、抬头、背包、把木头给我、脱困、记忆、状态、计划、停止。";
             }
         }
 
@@ -486,6 +509,10 @@ public class AIPlayerEntity extends Zombie {
         this.autoMaintainSurvival();
 
         if (this.autoRecoverFromHazards()) {
+            return;
+        }
+
+        if (this.performPendingDeliveryTask()) {
             return;
         }
 
@@ -650,7 +677,7 @@ public class AIPlayerEntity extends Zombie {
 
         double followDistance = guardMode ? 5.0D : 3.0D;
         double ownerDistanceSqr = this.distanceToSqr(owner);
-        if (ownerDistanceSqr >= TELEPORT_FOLLOW_DISTANCE_SQR && this.tryTeleportNearOwner(owner)) {
+        if (ownerDistanceSqr >= TELEPORT_FOLLOW_DISTANCE_SQR && this.tryTeleportNearPlayer(owner, "距离过远，已快速跟上主人@")) {
             return;
         }
 
@@ -714,10 +741,11 @@ public class AIPlayerEntity extends Zombie {
 
         if (this.canHarvestFromHere(target)) {
             if (this.harvestBlock(target, woodTask)) {
+                BlockPos nextTarget = this.findConnectedHarvestTarget(target, woodTask);
                 if (woodTask) {
-                    this.rememberedLog = null;
+                    this.rememberedLog = nextTarget;
                 } else {
-                    this.rememberedOre = null;
+                    this.rememberedOre = nextTarget;
                 }
                 this.scanSurroundings();
             }
@@ -842,6 +870,301 @@ public class AIPlayerEntity extends Zombie {
         }
     }
 
+    private String handleDeliveryRequest(ServerPlayer speaker, String content) {
+        DeliveryRequest request = this.parseDeliveryRequest(content);
+        if (request == null) {
+            return "我没听懂你想要哪种物品。你可以说：把木头给我、给我 16 个原木、把圆石给我。";
+        }
+
+        int available = this.countMatchingBackpackItems(request.matcher());
+        if (available <= 0) {
+            return "我的背包里没有" + request.label() + "。当前背包：" + this.getInventoryPreview();
+        }
+
+        this.assignOwner(speaker);
+        this.pendingDeliveryReceiverId = speaker.getUUID();
+        this.pendingDeliveryRequest = content;
+        this.lastObservation = "收到交付请求，准备把" + request.label() + "送给" + speaker.getName().getString() + "。";
+        this.markPersistentDirty();
+
+        if (request.deliverAll()) {
+            return "收到，我会把背包里的" + request.label() + "都拿给你，共 " + available + " 个。";
+        }
+
+        int deliverCount = Math.min(request.requestedCount(), available);
+        if (deliverCount < request.requestedCount()) {
+            return "收到，我背包里只有 " + available + " 个" + request.label() + "，先全部拿给你。";
+        }
+        return "收到，我给你送 " + deliverCount + " 个" + request.label() + "。";
+    }
+
+    private boolean performPendingDeliveryTask() {
+        if (this.pendingDeliveryReceiverId == null || this.pendingDeliveryRequest == null || this.pendingDeliveryRequest.isBlank()) {
+            return false;
+        }
+        if (!(this.level() instanceof ServerLevel serverLevel)) {
+            this.clearPendingDelivery();
+            return false;
+        }
+
+        Player player = serverLevel.getPlayerByUUID(this.pendingDeliveryReceiverId);
+        if (!(player instanceof ServerPlayer receiver) || !receiver.isAlive()) {
+            this.lastObservation = "收货玩家暂时不在，已取消交付。";
+            this.clearPendingDelivery();
+            return false;
+        }
+
+        DeliveryRequest request = this.parseDeliveryRequest(this.pendingDeliveryRequest);
+        if (request == null) {
+            this.lastObservation = "未能重新识别交付物品，已取消。";
+            this.clearPendingDelivery();
+            return false;
+        }
+
+        int available = this.countMatchingBackpackItems(request.matcher());
+        if (available <= 0) {
+            this.lastObservation = "背包里已经没有" + request.label() + "，交付结束。";
+            this.clearPendingDelivery();
+            return false;
+        }
+
+        int deliverCount = request.deliverAll() ? available : Math.min(request.requestedCount(), available);
+        double distanceSqr = this.distanceToSqr(receiver);
+        if (distanceSqr >= TELEPORT_FOLLOW_DISTANCE_SQR && this.tryTeleportNearPlayer(receiver, "距离过远，已快速赶去交付@")) {
+            return true;
+        }
+
+        if (distanceSqr > 9.0D) {
+            if (this.getNavigation().moveTo(receiver, FAST_FOLLOW_SPEED)) {
+                this.activeNavigationTarget = receiver.blockPosition();
+                this.lastNavigationSample = this.position();
+                this.stuckNavigationTicks = 0;
+            } else {
+                BlockPos fallback = this.findWalkablePositionNear(receiver.blockPosition(), 2, 3);
+                if (fallback != null) {
+                    this.navigateToPosition(fallback, FAST_FOLLOW_SPEED);
+                }
+            }
+            this.setForcedLookTarget(receiver.getEyePosition(), 10);
+            this.lastObservation = "正在靠近" + receiver.getName().getString() + "并准备交付" + request.label() + "。";
+            return true;
+        }
+
+        List<ItemStack> extracted = this.extractMatchingBackpackItems(request.matcher(), deliverCount);
+        if (extracted.isEmpty()) {
+            this.lastObservation = "准备交付时没有找到可用物品。";
+            this.clearPendingDelivery();
+            return false;
+        }
+
+        int totalGiven = 0;
+        for (ItemStack stack : extracted) {
+            totalGiven += this.transferStackToPlayer(receiver, stack);
+        }
+
+        this.lastObservation = "已向" + receiver.getName().getString() + "交付 " + totalGiven + " 个" + request.label() + "。";
+        this.remember("交付", this.lastObservation);
+        receiver.sendSystemMessage(Component.literal("[" + this.getAIName() + "] 已交付 " + totalGiven + " 个" + request.label() + "。"));
+        this.clearPendingDelivery();
+        this.markPersistentDirty();
+        return true;
+    }
+
+    private void clearPendingDelivery() {
+        this.pendingDeliveryReceiverId = null;
+        this.pendingDeliveryRequest = null;
+    }
+
+    private DeliveryRequest parseDeliveryRequest(String message) {
+        if (message == null || message.isBlank()) {
+            return null;
+        }
+
+        String normalized = message.toLowerCase().trim();
+        if (!containsAnyToken(normalized, "给我", "交给我", "给一下", "拿给我", "递给我", "give me", "bring me")) {
+            return null;
+        }
+
+        boolean deliverAll = containsAnyToken(normalized, "全部", "所有", "都给我", "all");
+        int requestedCount = this.extractRequestedCount(normalized);
+        if (requestedCount <= 0) {
+            deliverAll = true;
+        }
+
+        if (containsAnyToken(normalized, "橡木原木", "oak log", "oak_log")) {
+            return new DeliveryRequest("橡木原木", deliverAll, requestedCount, stack -> stack.getItem() == Items.OAK_LOG);
+        }
+        if (containsAnyToken(normalized, "橡木木板", "oak plank", "oak_planks")) {
+            return new DeliveryRequest("橡木木板", deliverAll, requestedCount, stack -> stack.getItem() == Items.OAK_PLANKS);
+        }
+        if (containsAnyToken(normalized, "圆石", "cobblestone", "cobble")) {
+            return new DeliveryRequest("圆石", deliverAll, requestedCount, stack -> stack.getItem() == Items.COBBLESTONE);
+        }
+        if (containsAnyToken(normalized, "木板", "板材", "plank", "planks")) {
+            return new DeliveryRequest("木板", deliverAll, requestedCount, stack -> this.isPlankItem(stack.getItem()));
+        }
+        if (containsAnyToken(normalized, "木头", "原木", "log", "wood")) {
+            return new DeliveryRequest("木头", deliverAll, requestedCount, stack -> this.isWoodItem(stack.getItem()));
+        }
+        if (containsAnyToken(normalized, "煤炭", "木炭", "煤", "coal", "charcoal")) {
+            return new DeliveryRequest("煤炭", deliverAll, requestedCount, stack -> stack.getItem() == Items.COAL || stack.getItem() == Items.CHARCOAL);
+        }
+        if (containsAnyToken(normalized, "铁锭", "iron ingot")) {
+            return new DeliveryRequest("铁锭", deliverAll, requestedCount, stack -> stack.getItem() == Items.IRON_INGOT);
+        }
+        if (containsAnyToken(normalized, "粗铁", "生铁", "raw iron")) {
+            return new DeliveryRequest("粗铁", deliverAll, requestedCount, stack -> stack.getItem() == Items.RAW_IRON);
+        }
+        if (containsAnyToken(normalized, "面包", "bread")) {
+            return new DeliveryRequest("面包", deliverAll, requestedCount, stack -> stack.getItem() == Items.BREAD);
+        }
+        if (containsAnyToken(normalized, "小麦", "wheat")) {
+            return new DeliveryRequest("小麦", deliverAll, requestedCount, stack -> stack.getItem() == Items.WHEAT);
+        }
+        if (containsAnyToken(normalized, "木棍", "stick", "sticks")) {
+            return new DeliveryRequest("木棍", deliverAll, requestedCount, stack -> stack.getItem() == Items.STICK);
+        }
+        if (containsAnyToken(normalized, "石镐", "石头镐", "pickaxe", "stone_pickaxe")) {
+            return new DeliveryRequest("石镐", deliverAll, requestedCount, stack -> stack.getItem() == Items.STONE_PICKAXE);
+        }
+        if (containsAnyToken(normalized, "石斧", "斧头", "axe", "stone_axe")) {
+            return new DeliveryRequest("石斧", deliverAll, requestedCount, stack -> stack.getItem() == Items.STONE_AXE);
+        }
+        if (containsAnyToken(normalized, "盾牌", "shield")) {
+            return new DeliveryRequest("盾牌", deliverAll, requestedCount, stack -> stack.getItem() == Items.SHIELD);
+        }
+        if (containsAnyToken(normalized, "铁剑", "剑", "sword", "iron_sword")) {
+            return new DeliveryRequest("铁剑", deliverAll, requestedCount, stack -> stack.getItem() == Items.IRON_SWORD);
+        }
+        if (containsAnyToken(normalized, "矿物", "矿石", "ore", "minerals")) {
+            return new DeliveryRequest("矿物", deliverAll, requestedCount, stack -> this.isOreMaterial(stack.getItem()));
+        }
+        return null;
+    }
+
+    private int countMatchingBackpackItems(Predicate<ItemStack> matcher) {
+        int total = 0;
+        for (ItemStack stack : this.backpack) {
+            if (!stack.isEmpty() && matcher.test(stack)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private List<ItemStack> extractMatchingBackpackItems(Predicate<ItemStack> matcher, int count) {
+        List<ItemStack> extracted = new ArrayList<>();
+        int remaining = count;
+
+        for (int index = 0; index < this.backpack.size() && remaining > 0; index++) {
+            ItemStack stack = this.backpack.get(index);
+            if (stack.isEmpty() || !matcher.test(stack)) {
+                continue;
+            }
+
+            int takenCount = Math.min(stack.getCount(), remaining);
+            ItemStack taken = stack.copy();
+            taken.setCount(takenCount);
+            stack.shrink(takenCount);
+            if (stack.isEmpty()) {
+                this.backpack.set(index, ItemStack.EMPTY);
+            }
+            extracted.add(taken);
+            remaining -= takenCount;
+        }
+
+        if (!extracted.isEmpty()) {
+            this.markPersistentDirty();
+        }
+        return extracted;
+    }
+
+    private int transferStackToPlayer(ServerPlayer receiver, ItemStack stack) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) {
+            return 0;
+        }
+
+        ItemStack remaining = stack.copy();
+        receiver.getInventory().add(remaining);
+        receiver.containerMenu.broadcastChanges();
+        if (!remaining.isEmpty()) {
+            ItemEntity itemEntity = new ItemEntity(serverLevel, receiver.getX(), receiver.getY() + 0.5D, receiver.getZ(), remaining.copy());
+            itemEntity.setDefaultPickUpDelay();
+            itemEntity.setDeltaMovement(receiver.getLookAngle().scale(0.05D).add(0.0D, 0.12D, 0.0D));
+            serverLevel.addFreshEntity(itemEntity);
+        }
+        return stack.getCount();
+    }
+
+    private int extractRequestedCount(String text) {
+        Matcher matcher = NUMBER_PATTERN.matcher(text);
+        if (matcher.find()) {
+            return Integer.parseInt(matcher.group(1));
+        }
+        if (containsAnyToken(text, "一组", "一组的", "一组吧")) {
+            return 64;
+        }
+        if (containsAnyToken(text, "一个", "一份", "一块", "一根", "一把", "一柄")) {
+            return 1;
+        }
+        if (containsAnyToken(text, "两个", "两块", "两根", "两把")) {
+            return 2;
+        }
+        if (containsAnyToken(text, "三个")) {
+            return 3;
+        }
+        if (containsAnyToken(text, "四个")) {
+            return 4;
+        }
+        if (containsAnyToken(text, "五个")) {
+            return 5;
+        }
+        if (containsAnyToken(text, "十个")) {
+            return 10;
+        }
+        if (containsAnyToken(text, "半组")) {
+            return 32;
+        }
+        return -1;
+    }
+
+    private boolean isWoodItem(Item item) {
+        Identifier key = BuiltInRegistries.ITEM.getKey(item);
+        if (key == null) {
+            return false;
+        }
+        String path = key.getPath();
+        return path.endsWith("_log") || path.endsWith("_stem") || path.endsWith("_hyphae");
+    }
+
+    private boolean isPlankItem(Item item) {
+        Identifier key = BuiltInRegistries.ITEM.getKey(item);
+        return key != null && key.getPath().endsWith("_planks");
+    }
+
+    private boolean isOreMaterial(Item item) {
+        return item == Items.COAL
+                || item == Items.CHARCOAL
+                || item == Items.RAW_IRON
+                || item == Items.RAW_COPPER
+                || item == Items.RAW_GOLD
+                || item == Items.DIAMOND
+                || item == Items.EMERALD
+                || item == Items.REDSTONE
+                || item == Items.LAPIS_LAZULI
+                || item == Items.QUARTZ
+                || item == Items.NETHERITE_SCRAP;
+    }
+
+    private static boolean containsAnyToken(String text, String... tokens) {
+        for (String token : tokens) {
+            if (text.contains(token)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private boolean autoRecoverFromHazards() {
         if (!this.isInWater() && !this.isUnderWater() && !this.isInLava()) {
             return false;
@@ -893,10 +1216,10 @@ public class AIPlayerEntity extends Zombie {
         return false;
     }
 
-    private boolean tryTeleportNearOwner(ServerPlayer owner) {
-        BlockPos destination = this.findWalkablePositionNear(owner.blockPosition(), 3, 4);
+    private boolean tryTeleportNearPlayer(ServerPlayer player, String observationPrefix) {
+        BlockPos destination = this.findWalkablePositionNear(player.blockPosition(), 3, 4);
         if (destination == null) {
-            destination = this.findNearbyDryStandPosition(owner.blockPosition(), 4, 4);
+            destination = this.findNearbyDryStandPosition(player.blockPosition(), 4, 4);
         }
         if (destination == null) {
             return false;
@@ -905,7 +1228,7 @@ public class AIPlayerEntity extends Zombie {
         this.teleportTo(destination.getX() + 0.5D, destination.getY(), destination.getZ() + 0.5D);
         this.getNavigation().stop();
         this.resetNavigationState();
-        this.lastObservation = "距离过远，已快速跟上主人@" + this.formatPos(destination);
+        this.lastObservation = observationPrefix + this.formatPos(destination);
         return true;
     }
 
@@ -985,6 +1308,36 @@ public class AIPlayerEntity extends Zombie {
             if (distance < bestDistance) {
                 bestDistance = distance;
                 bestPos = candidate;
+            }
+        }
+
+        return bestPos;
+    }
+
+    private BlockPos findConnectedHarvestTarget(BlockPos origin, boolean woodTask) {
+        BlockPos bestPos = null;
+        double bestScore = Double.MAX_VALUE;
+
+        for (int x = -1; x <= 1; x++) {
+            for (int y = woodTask ? 0 : -1; y <= (woodTask ? 2 : 1); y++) {
+                for (int z = -1; z <= 1; z++) {
+                    if (x == 0 && y == 0 && z == 0) {
+                        continue;
+                    }
+                    BlockPos candidate = origin.offset(x, y, z);
+                    if (!this.isValidHarvestTarget(candidate, woodTask)) {
+                        continue;
+                    }
+
+                    double score = origin.distSqr(candidate) + this.distanceToSqr(Vec3.atCenterOf(candidate));
+                    if (woodTask && candidate.getY() > origin.getY()) {
+                        score -= 0.75D;
+                    }
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestPos = candidate;
+                    }
+                }
             }
         }
 
@@ -1719,6 +2072,7 @@ public class AIPlayerEntity extends Zombie {
     private void markPersistentDirty() {
         if (!this.level().isClientSide()) {
             this.persistentStateDirty = true;
+            this.syncClientTelemetry();
         }
     }
 
@@ -1959,6 +2313,21 @@ public class AIPlayerEntity extends Zombie {
         return entries.isEmpty() ? "空" : String.join("、", entries);
     }
 
+    public String getClientStatusLine() {
+        String synced = this.entityData.get(DATA_STATUS);
+        return synced == null || synced.isBlank() ? this.buildClientStatusLine() : synced;
+    }
+
+    public String getClientObservationSummary() {
+        String synced = this.entityData.get(DATA_OBSERVATION);
+        return synced == null || synced.isBlank() ? this.getObservationSummary() : synced;
+    }
+
+    public String getClientInventorySummary() {
+        String synced = this.entityData.get(DATA_INVENTORY);
+        return synced == null || synced.isBlank() ? this.getInventoryPreview() : synced;
+    }
+
     private String formatPos(BlockPos pos) {
         return pos.getX() + "," + pos.getY() + "," + pos.getZ();
     }
@@ -1982,6 +2351,7 @@ public class AIPlayerEntity extends Zombie {
         this.entityData.set(DATA_AI_NAME, this.aiName);
         this.entityData.set(DATA_MODE, this.safeModeCommandName());
         this.entityData.set(DATA_BLUEPRINT, this.activeBlueprintId);
+        this.syncClientTelemetry();
         this.setCustomName(Component.literal(this.aiName + " [" + this.safeModeDisplayName() + "]"));
         this.setCustomNameVisible(true);
     }
@@ -1991,6 +2361,27 @@ public class AIPlayerEntity extends Zombie {
         this.entityData.set(DATA_OWNER_ID, this.ownerId == null ? "" : this.ownerId.toString());
         this.entityData.set(DATA_MODE, this.safeModeCommandName());
         this.entityData.set(DATA_BLUEPRINT, this.activeBlueprintId);
+        this.syncClientTelemetry();
+    }
+
+    private void syncClientTelemetry() {
+        this.entityData.set(DATA_STATUS, this.clipSyncText(this.buildClientStatusLine()));
+        this.entityData.set(DATA_OBSERVATION, this.clipSyncText(this.lastObservation == null || this.lastObservation.isBlank() ? DEFAULT_OBSERVATION : this.lastObservation));
+        this.entityData.set(DATA_INVENTORY, this.clipSyncText(this.getInventoryPreview()));
+    }
+
+    private String buildClientStatusLine() {
+        return "模式：" + this.safeModeDisplayName()
+                + " | 生命：" + Math.round(this.getHealth()) + "/" + Math.round(this.getMaxHealth())
+                + " | 背包：" + this.getUsedBackpackSlots() + "/" + BACKPACK_SIZE
+                + (this.pendingDeliveryRequest != null ? " | 正在交付" : "");
+    }
+
+    private String clipSyncText(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        return text.length() <= 240 ? text : text.substring(0, 240) + "...";
     }
 
     public String getOwnerIdString() {
@@ -2051,6 +2442,9 @@ public class AIPlayerEntity extends Zombie {
 
     private String contentSafe(ServerPlayer speaker, ChatIntent intent) {
         return intent.name() + (speaker == null ? "" : ("@" + speaker.getName().getString()));
+    }
+
+    private record DeliveryRequest(String label, boolean deliverAll, int requestedCount, Predicate<ItemStack> matcher) {
     }
 }
 
