@@ -54,6 +54,7 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CropBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -78,7 +79,7 @@ public class AIPlayerEntity extends Zombie {
     private static final String DEFAULT_OBSERVATION = "All clear.";
     private static final String DEFAULT_BLUEPRINT_ID = "shelter";
     private static final Pattern NUMBER_PATTERN = Pattern.compile("(\\d+)");
-    private static final int BACKPACK_SIZE = 27;
+    private static final int BACKPACK_SIZE = 36;
     private static final int SCAN_RADIUS = 12;
     private static final int SCAN_VERTICAL_DOWN = 6;
     private static final int SCAN_VERTICAL_UP = 10;
@@ -91,6 +92,7 @@ public class AIPlayerEntity extends Zombie {
     private static final double NORMAL_FOLLOW_SPEED = 1.15D;
     private static final double FAST_FOLLOW_DISTANCE_SQR = 12.0D * 12.0D;
     private static final double TELEPORT_FOLLOW_DISTANCE_SQR = 32.0D * 32.0D;
+    private static final int ALERT_COOLDOWN_TICKS = 120;
 
     private final NonNullList<ItemStack> backpack = NonNullList.withSize(BACKPACK_SIZE, ItemStack.EMPTY);
     private final List<String> memory = new ArrayList<>();
@@ -121,6 +123,8 @@ public class AIPlayerEntity extends Zombie {
     private String latestAgentPlanSummary = "观察环境 -> 等待下一步";
     private String latestAgentReasoning = "本地规则";
     private String lastAgentLearnKey = "";
+    private int lastOwnerAlertTick;
+    private String lastOwnerAlertMessage = "";
 
     public AIPlayerEntity(EntityType<? extends Zombie> entityType, Level level) {
         super(entityType, level);
@@ -576,11 +580,20 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private void autoMaintainSurvival() {
-        if (this.getHealth() <= 12.0F && this.consumeBackpackItem(Items.BREAD, 1)) {
-            this.heal(4.0F);
+        this.autoSortBackpack();
+        this.autoEquipBestAvailableGear();
+        this.tryCraftBread();
+        this.tryCraftTorchBundle();
+        this.tryCraftStoneTool(Items.STONE_AXE, "石斧");
+        this.tryCraftStoneTool(Items.STONE_PICKAXE, "石镐");
+        this.shareResourcesWithTeammates();
+
+        ItemStack food = this.findBestRecoveryFood();
+        if (this.getHealth() <= 12.0F && !food.isEmpty() && this.consumeBackpackItem(food.getItem(), 1)) {
+            this.heal(this.getHealingValue(food));
             this.crouchTicks = Math.max(this.crouchTicks, 15);
-            this.lastObservation = "已消耗面包进行恢复。";
-            this.remember("生存", "消耗面包恢复生命");
+            this.lastObservation = "已消耗" + food.getHoverName().getString() + "进行恢复。";
+            this.remember("生存", "消耗" + food.getHoverName().getString() + "恢复生命");
         }
     }
 
@@ -820,6 +833,10 @@ public class AIPlayerEntity extends Zombie {
             return;
         }
 
+        if (this.tryPlaceTorchForSafety()) {
+            return;
+        }
+
         if (this.getTarget() != null && this.getTarget().isAlive()) {
             return;
         }
@@ -842,6 +859,9 @@ public class AIPlayerEntity extends Zombie {
             this.setTarget(this.observedHostile);
             return;
         }
+
+        this.coordinateBuildTeamRoles();
+        this.tryPlaceTorchForSafety();
 
         if (this.countAvailableBuildingUnits() < 12) {
             this.lastObservation = "建材不足，先去砍树。";
@@ -886,6 +906,8 @@ public class AIPlayerEntity extends Zombie {
             return;
         }
 
+        this.tryPlaceTorchForSafety();
+
         if (this.manageNearbyFarm()) {
             return;
         }
@@ -910,6 +932,357 @@ public class AIPlayerEntity extends Zombie {
             this.performFollow(true);
         } else {
             this.performExplore();
+        }
+    }
+
+    private ItemStack findBestRecoveryFood() {
+        ItemStack best = ItemStack.EMPTY;
+        int bestScore = Integer.MIN_VALUE;
+        for (ItemStack stack : this.backpack) {
+            if (stack.isEmpty() || !this.isRecoveryFood(stack)) {
+                continue;
+            }
+            int score = this.getHealingScore(stack);
+            if (score > bestScore) {
+                bestScore = score;
+                best = stack;
+            }
+        }
+        return best;
+    }
+
+    private int getHealingScore(ItemStack stack) {
+        Item item = stack.getItem();
+        if (item == Items.COOKED_BEEF || item == Items.COOKED_PORKCHOP || item == Items.COOKED_MUTTON) {
+            return 6;
+        }
+        if (item == Items.BREAD || item == Items.COOKED_CHICKEN || item == Items.COOKED_COD || item == Items.COOKED_SALMON) {
+            return 4;
+        }
+        if (item == Items.CARROT || item == Items.POTATO || item == Items.BAKED_POTATO || item == Items.BEETROOT) {
+            return 3;
+        }
+        return 2;
+    }
+
+    private float getHealingValue(ItemStack stack) {
+        return (float)this.getHealingScore(stack);
+    }
+
+    private boolean tryCraftTorchBundle() {
+        if (this.countBackpackItem(Items.TORCH) >= 8) {
+            return false;
+        }
+        if (this.countBackpackItem(Items.STICK) <= 0) {
+            return false;
+        }
+        Item fuel = this.countBackpackItem(Items.COAL) > 0 ? Items.COAL : (this.countBackpackItem(Items.CHARCOAL) > 0 ? Items.CHARCOAL : Items.AIR);
+        if (fuel == Items.AIR) {
+            return false;
+        }
+
+        this.consumeBackpackItem(fuel, 1);
+        this.consumeBackpackItem(Items.STICK, 1);
+        this.storeInBackpack(new ItemStack(Items.TORCH, 4));
+        this.remember("合成", "制作火把");
+        return true;
+    }
+
+    private boolean tryPlaceTorchForSafety() {
+        if (!(this.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        if (this.tickCount % 40 != 0) {
+            return false;
+        }
+        AIPlayerMode mode = this.safeMode();
+        if (mode != AIPlayerMode.MINE && mode != AIPlayerMode.EXPLORE && mode != AIPlayerMode.SURVIVE && mode != AIPlayerMode.BUILD_SHELTER) {
+            return false;
+        }
+        if (this.countBackpackItem(Items.TORCH) <= 0) {
+            return false;
+        }
+        if (serverLevel.getMaxLocalRawBrightness(this.blockPosition()) > 5) {
+            return false;
+        }
+
+        BlockPos placePos = this.findTorchPlacement();
+        if (placePos == null) {
+            return false;
+        }
+        BlockState torchState = Blocks.TORCH.defaultBlockState();
+        if (!torchState.canSurvive(serverLevel, placePos)) {
+            return false;
+        }
+
+        serverLevel.setBlock(placePos, torchState, 3);
+        this.consumeBackpackItem(Items.TORCH, 1);
+        this.lastObservation = "已放置火把@" + this.formatPos(placePos);
+        this.remember("照明", this.lastObservation);
+        return true;
+    }
+
+    private BlockPos findTorchPlacement() {
+        BlockPos origin = this.blockPosition();
+        for (int y = -1; y <= 1; y++) {
+            for (Direction direction : Direction.Plane.HORIZONTAL) {
+                BlockPos candidate = origin.offset(direction.getStepX(), y, direction.getStepZ());
+                if (this.level().getBlockState(candidate).isAir() && !this.level().getBlockState(candidate.below()).isAir()) {
+                    return candidate;
+                }
+            }
+        }
+        return this.level().getBlockState(origin).isAir() && !this.level().getBlockState(origin.below()).isAir() ? origin : null;
+    }
+
+    private void autoSortBackpack() {
+        if (this.tickCount % 40 != 0) {
+            return;
+        }
+        List<ItemStack> items = new ArrayList<>();
+        for (ItemStack stack : this.backpack) {
+            if (!stack.isEmpty()) {
+                items.add(stack.copy());
+            }
+        }
+        items.sort(Comparator
+                .comparingInt(this::getBackpackSortCategory)
+                .thenComparing(stack -> this.getItemPath(stack.getItem()))
+                .thenComparingInt(ItemStack::getCount).reversed());
+        for (int index = 0; index < this.backpack.size(); index++) {
+            this.backpack.set(index, index < items.size() ? items.get(index) : ItemStack.EMPTY);
+        }
+    }
+
+    private int getBackpackSortCategory(ItemStack stack) {
+        Item item = stack.getItem();
+        if (this.isRecoveryFood(stack)) {
+            return 0;
+        }
+        if (item == Items.TORCH) {
+            return 1;
+        }
+        if (this.isCombatOrToolItem(item) || this.isArmorItem(item)) {
+            return 2;
+        }
+        if (this.isLogItem(stack) || this.isPlankItem(item)) {
+            return 3;
+        }
+        if (this.isOreMaterial(item) || this.isInterestingOre(item instanceof BlockItem blockItem ? blockItem.getBlock().defaultBlockState() : Blocks.AIR.defaultBlockState())) {
+            return 4;
+        }
+        return 5;
+    }
+
+    private void autoEquipBestAvailableGear() {
+        if (this.tickCount % 20 != 0) {
+            return;
+        }
+        this.equipBestMainHand();
+        this.equipBestArmorPiece(EquipmentSlot.HEAD, Items.LEATHER_HELMET);
+        this.equipBestArmorPiece(EquipmentSlot.CHEST, Items.LEATHER_CHESTPLATE);
+        this.equipBestArmorPiece(EquipmentSlot.LEGS, Items.LEATHER_LEGGINGS);
+        this.equipBestArmorPiece(EquipmentSlot.FEET, Items.LEATHER_BOOTS);
+        if (this.countBackpackItem(Items.SHIELD) > 0 || this.getOffhandItem().isEmpty()) {
+            this.setItemSlot(EquipmentSlot.OFFHAND, new ItemStack(Items.SHIELD));
+        }
+    }
+
+    private void equipBestMainHand() {
+        ItemStack best = switch (this.safeMode()) {
+            case GATHER_WOOD, BUILD_SHELTER -> this.findBestToolInBackpack(this::isAxeItem, Items.STONE_AXE);
+            case MINE -> this.findBestToolInBackpack(this::isPickaxeItem, Items.STONE_PICKAXE);
+            default -> this.findBestCombatItem();
+        };
+        if (!best.isEmpty()) {
+            this.setItemSlot(EquipmentSlot.MAINHAND, best.copy());
+        }
+    }
+
+    private ItemStack findBestToolInBackpack(Predicate<Item> matcher, Item fallback) {
+        ItemStack best = ItemStack.EMPTY;
+        int bestScore = Integer.MIN_VALUE;
+        for (ItemStack stack : this.backpack) {
+            if (stack.isEmpty() || !matcher.test(stack.getItem())) {
+                continue;
+            }
+            int score = this.getToolScore(stack.getItem());
+            if (score > bestScore) {
+                bestScore = score;
+                best = stack;
+            }
+        }
+        return best.isEmpty() ? new ItemStack(fallback) : best;
+    }
+
+    private ItemStack findBestCombatItem() {
+        ItemStack best = ItemStack.EMPTY;
+        int bestScore = Integer.MIN_VALUE;
+        for (ItemStack stack : this.backpack) {
+            if (stack.isEmpty()) {
+                continue;
+            }
+            Item item = stack.getItem();
+            if (!this.isSwordItem(item) && !this.isAxeItem(item)) {
+                continue;
+            }
+            int score = this.getToolScore(item) + (this.isSwordItem(item) ? 2 : 0);
+            if (score > bestScore) {
+                bestScore = score;
+                best = stack;
+            }
+        }
+        return best.isEmpty() ? new ItemStack(Items.IRON_SWORD) : best;
+    }
+
+    private void equipBestArmorPiece(EquipmentSlot slot, Item fallback) {
+        ItemStack best = ItemStack.EMPTY;
+        int bestScore = Integer.MIN_VALUE;
+        for (ItemStack stack : this.backpack) {
+            if (stack.isEmpty() || !this.matchesArmorSlot(stack.getItem(), slot)) {
+                continue;
+            }
+            int score = this.getArmorScore(stack.getItem(), slot);
+            if (score > bestScore) {
+                bestScore = score;
+                best = stack;
+            }
+        }
+        this.setItemSlot(slot, best.isEmpty() ? new ItemStack(fallback) : best.copy());
+    }
+
+    private int getToolScore(Item item) {
+        String path = this.getItemPath(item);
+        if (path.contains("netherite")) {
+            return 6;
+        }
+        if (path.contains("diamond")) {
+            return 5;
+        }
+        if (path.contains("iron") || path.contains("chainmail")) {
+            return 4;
+        }
+        if (path.contains("stone")) {
+            return 3;
+        }
+        if (path.contains("gold")) {
+            return 2;
+        }
+        if (path.contains("leather") || path.contains("wooden")) {
+            return 1;
+        }
+        return 0;
+    }
+
+    private int getArmorScore(Item item, EquipmentSlot slot) {
+        return this.matchesArmorSlot(item, slot) ? this.getToolScore(item) * 10 : Integer.MIN_VALUE;
+    }
+
+    private boolean isCombatOrToolItem(Item item) {
+        return this.isSwordItem(item) || this.isAxeItem(item) || this.isPickaxeItem(item) || this.isArmorItem(item);
+    }
+
+    private boolean isSwordItem(Item item) {
+        return this.getItemPath(item).endsWith("_sword");
+    }
+
+    private boolean isAxeItem(Item item) {
+        return this.getItemPath(item).endsWith("_axe");
+    }
+
+    private boolean isPickaxeItem(Item item) {
+        return this.getItemPath(item).endsWith("_pickaxe");
+    }
+
+    private boolean isArmorItem(Item item) {
+        return this.matchesArmorSlot(item, EquipmentSlot.HEAD)
+                || this.matchesArmorSlot(item, EquipmentSlot.CHEST)
+                || this.matchesArmorSlot(item, EquipmentSlot.LEGS)
+                || this.matchesArmorSlot(item, EquipmentSlot.FEET);
+    }
+
+    private boolean matchesArmorSlot(Item item, EquipmentSlot slot) {
+        String path = this.getItemPath(item);
+        return switch (slot) {
+            case HEAD -> path.endsWith("_helmet");
+            case CHEST -> path.endsWith("_chestplate");
+            case LEGS -> path.endsWith("_leggings");
+            case FEET -> path.endsWith("_boots");
+            default -> false;
+        };
+    }
+
+    private String getItemPath(Item item) {
+        Identifier key = BuiltInRegistries.ITEM.getKey(item);
+        return key == null ? "" : key.getPath();
+    }
+
+    private String getItemDisplayName(Item item) {
+        return new ItemStack(item).getHoverName().getString();
+    }
+
+    private boolean isRecoveryFood(ItemStack stack) {
+        Item item = stack.getItem();
+        return item == Items.BREAD
+                || item == Items.COOKED_BEEF
+                || item == Items.COOKED_PORKCHOP
+                || item == Items.COOKED_MUTTON
+                || item == Items.COOKED_CHICKEN
+                || item == Items.COOKED_COD
+                || item == Items.COOKED_SALMON
+                || item == Items.BAKED_POTATO
+                || item == Items.CARROT
+                || item == Items.POTATO
+                || item == Items.BEETROOT
+                || item == Items.APPLE;
+    }
+
+    private void shareResourcesWithTeammates() {
+        if (this.tickCount % 60 != 0) {
+            return;
+        }
+        for (AIPlayerEntity teammate : AITaskCoordinator.getTeam(this, this.safeMode(), 8.0D)) {
+            if (teammate == this) {
+                continue;
+            }
+            this.tryShareItemWithTeammate(teammate, Items.BREAD, 2, 4);
+            this.tryShareItemWithTeammate(teammate, Items.TORCH, 4, 8);
+            this.tryShareItemWithTeammate(teammate, Items.OAK_PLANKS, 8, 16);
+        }
+    }
+
+    private void tryShareItemWithTeammate(AIPlayerEntity teammate, Item item, int batchSize, int reserve) {
+        int ownCount = this.countBackpackItem(item);
+        if (ownCount <= reserve || teammate.countBackpackItem(item) >= reserve / 2) {
+            return;
+        }
+        int moved = Math.min(batchSize, ownCount - reserve);
+        if (moved <= 0 || !this.consumeBackpackItem(item, moved)) {
+            return;
+        }
+        teammate.storeInBackpack(new ItemStack(item, moved));
+        String itemName = this.getItemDisplayName(item);
+        teammate.remember("协作", "收到共享物资 " + itemName + "x" + moved);
+        this.remember("协作", "向队友共享 " + itemName + "x" + moved);
+    }
+
+    private void coordinateBuildTeamRoles() {
+        if (this.safeMode() != AIPlayerMode.BUILD_SHELTER) {
+            return;
+        }
+        int teamSize = AITaskCoordinator.getTeamSize(this, AIPlayerMode.BUILD_SHELTER, 20.0D);
+        if (teamSize <= 1) {
+            return;
+        }
+        int slot = AITaskCoordinator.getTeamSlot(this, AIPlayerMode.BUILD_SHELTER, 20.0D);
+        if (slot % 3 == 1 && this.countAvailableBuildingUnits() < 16) {
+            this.lastObservation = "队伍分工：我去补建筑材料。";
+            this.performHarvestTask(true);
+        } else if (slot % 3 == 2 && this.observedHostile == null) {
+            ServerPlayer owner = this.getOwnerPlayer();
+            if (owner != null) {
+                this.performFollow(true);
+            }
         }
     }
 
