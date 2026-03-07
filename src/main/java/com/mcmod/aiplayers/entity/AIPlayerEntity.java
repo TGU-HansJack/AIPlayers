@@ -49,6 +49,7 @@ import net.minecraft.world.entity.ai.goal.LookAtPlayerGoal;
 import net.minecraft.world.entity.ai.goal.MeleeAttackGoal;
 import net.minecraft.world.entity.ai.goal.RandomLookAroundGoal;
 import net.minecraft.world.entity.ai.goal.target.HurtByTargetGoal;
+import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.entity.monster.zombie.Zombie;
 import net.minecraft.world.entity.player.Player;
@@ -65,6 +66,7 @@ import net.minecraft.world.level.block.CropBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.gamerules.GameRules;
+import net.minecraft.world.level.pathfinder.PathType;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -89,6 +91,10 @@ public class AIPlayerEntity extends Zombie {
     private static final int SCAN_VERTICAL_DOWN = 6;
     private static final int SCAN_VERTICAL_UP = 10;
     private static final int SCAN_INTERVAL = 20;
+    private static final int RESOURCE_SCAN_INTERVAL = 60;
+    private static final int UTILITY_SCAN_INTERVAL = 100;
+    private static final int CROP_SCAN_INTERVAL = 60;
+    private static final int TELEMETRY_SYNC_INTERVAL = 10;
     private static final int MEMORY_LIMIT = 12;
     private static final int NAVIGATION_STUCK_THRESHOLD = 60;
     private static final double HARVEST_REACH = 4.75D;
@@ -155,14 +161,29 @@ public class AIPlayerEntity extends Zombie {
     private boolean playerModePinned;
     private AIPlayerMode playerPinnedMode;
     private String lastTaskAiServiceStatus = "待机";
+    private int lastResourceScanTick;
+    private int lastUtilityScanTick;
+    private int lastCropScanTick;
+    private int lastTelemetrySyncTick = -TELEMETRY_SYNC_INTERVAL;
 
     public AIPlayerEntity(EntityType<? extends Zombie> entityType, Level level) {
         super(entityType, level);
         this.setPersistenceRequired();
         this.setCanPickUpLoot(false);
+        this.moveControl = new AIPlayerMoveControl(this);
         this.getNavigation().setCanFloat(true);
+        this.setPathfindingMalus(PathType.WATER, 0.0F);
+        this.setPathfindingMalus(PathType.WATER_BORDER, 1.0F);
+        this.setPathfindingMalus(PathType.WALKABLE_DOOR, 0.0F);
+        this.setPathfindingMalus(PathType.DOOR_OPEN, 0.0F);
+        this.setPathfindingMalus(PathType.LEAVES, 0.0F);
         this.xpReward = 0;
         this.refreshDisplayName();
+    }
+
+    @Override
+    protected PathNavigation createNavigation(Level level) {
+        return new AIPlayerGroundNavigation(this, level);
     }
 
     @Override
@@ -239,7 +260,7 @@ public class AIPlayerEntity extends Zombie {
         this.tickNavigationState();
         this.runModeLogic();
 
-        if (this.tickCount % 10 == 0) {
+        if (this.tickCount % TELEMETRY_SYNC_INTERVAL == 0) {
             this.syncClientTelemetry();
         }
 
@@ -1158,11 +1179,11 @@ public class AIPlayerEntity extends Zombie {
 
         if (ownerDistanceSqr > followDistance * followDistance) {
             double speed = ownerDistanceSqr >= FAST_FOLLOW_DISTANCE_SQR ? FAST_FOLLOW_SPEED : NORMAL_FOLLOW_SPEED;
-            if (this.getNavigation().moveTo(owner, speed)) {
-                this.activeNavigationTarget = owner.blockPosition();
-                this.lastNavigationSample = this.position();
-                this.stuckNavigationTicks = 0;
+            BlockPos ownerGoal = this.findWalkablePositionNear(owner.blockPosition(), 1, 2);
+            if (ownerGoal == null) {
+                ownerGoal = owner.blockPosition();
             }
+            this.navigateToPosition(ownerGoal, speed);
         } else {
             this.getNavigation().stop();
             this.resetNavigationState();
@@ -1791,17 +1812,11 @@ public class AIPlayerEntity extends Zombie {
         }
 
         if (distanceSqr > 9.0D) {
-            if (this.getNavigation().moveTo(receiver, FAST_FOLLOW_SPEED)) {
-                this.activeNavigationTarget = receiver.blockPosition();
-                this.lastNavigationSample = this.position();
-                this.stuckNavigationTicks = 0;
-            } else {
-                BlockPos fallback = this.findWalkablePositionNear(receiver.blockPosition(), 2, 3);
-                if (fallback != null) {
-                    this.navigateToPosition(fallback, FAST_FOLLOW_SPEED);
-                } else {
-                    this.reportTaskFailure(this.activeTaskName, "无法靠近 " + receiver.getName().getString() + " 完成交付");
-                }
+            BlockPos receiverGoal = this.findWalkablePositionNear(receiver.blockPosition(), 2, 3);
+            if (receiverGoal != null) {
+                this.navigateToPosition(receiverGoal, FAST_FOLLOW_SPEED);
+            } else if (!this.navigateToPosition(receiver.blockPosition(), FAST_FOLLOW_SPEED)) {
+                this.reportTaskFailure(this.activeTaskName, "无法靠近 " + receiver.getName().getString() + " 完成交付");
             }
             this.setForcedLookTarget(receiver.getEyePosition(), 10);
             this.lastObservation = "正在靠近" + receiver.getName().getString() + "并准备交付" + request.label() + "。";
@@ -2166,9 +2181,14 @@ public class AIPlayerEntity extends Zombie {
         Vec3 delta = target.subtract(this.position());
         Vec3 horizontal = new Vec3(delta.x, 0.0D, delta.z);
         if (horizontal.lengthSqr() > 1.0E-4D) {
-            Vec3 normalized = horizontal.normalize().scale(horizontalSpeed);
-            Vec3 motion = this.getDeltaMovement();
-            this.setDeltaMovement(normalized.x, Math.max(motion.y, verticalSpeed), normalized.z);
+            double moveSpeed = Math.max(0.85D, horizontalSpeed * 5.0D);
+            this.facePosition(target);
+            this.getMoveControl().setWantedPosition(target.x, target.y, target.z, moveSpeed);
+            if ((this.isInWater() || this.isUnderWater() || this.isInLava()) && this.jumpCooldown <= 0) {
+                Vec3 motion = this.getDeltaMovement();
+                this.setDeltaMovement(motion.x, Math.max(motion.y, verticalSpeed), motion.z);
+                this.jumpCooldown = 8;
+            }
         }
     }
 
@@ -2582,6 +2602,9 @@ public class AIPlayerEntity extends Zombie {
 
     private void scanSurroundings() {
         AABB scanBox = this.getBoundingBox().inflate(SCAN_RADIUS);
+        boolean rescanResources = this.tickCount - this.lastResourceScanTick >= RESOURCE_SCAN_INTERVAL;
+        boolean rescanUtilities = this.tickCount - this.lastUtilityScanTick >= UTILITY_SCAN_INTERVAL;
+        boolean rescanCrop = this.tickCount - this.lastCropScanTick >= CROP_SCAN_INTERVAL;
 
         LivingEntity previousHostile = this.observedHostile;
         ItemEntity previousDrop = this.observedDrop;
@@ -2602,21 +2625,34 @@ public class AIPlayerEntity extends Zombie {
                 .min(Comparator.comparingDouble(this::distanceToSqr))
                 .orElse(null);
 
-        this.rememberedLog = this.isValidHarvestTarget(this.rememberedLog, true) ? this.rememberedLog : this.findNearestHarvestBlock(true);
-        this.rememberedOre = this.isValidHarvestTarget(this.rememberedOre, false) ? this.rememberedOre : this.findNearestHarvestBlock(false);
-        this.rememberedBed = this.isRememberedUtilityBlockValid(this.rememberedBed, this::isBedBlock)
-                ? this.rememberedBed
-                : this.findNearestUtilityBlock(this::isBedBlock, 10, 3, 6);
-        this.rememberedChest = this.isRememberedUtilityBlockValid(this.rememberedChest, this::isStorageBlock)
-                ? this.rememberedChest
-                : this.findNearestUtilityBlock(this::isStorageBlock, 10, 3, 6);
-        this.rememberedCraftingTable = this.isRememberedUtilityBlockValid(this.rememberedCraftingTable, this::isCraftingBlock)
-                ? this.rememberedCraftingTable
-                : this.findNearestUtilityBlock(this::isCraftingBlock, 10, 3, 6);
-        this.rememberedFurnace = this.isRememberedUtilityBlockValid(this.rememberedFurnace, this::isFurnaceBlock)
-                ? this.rememberedFurnace
-                : this.findNearestUtilityBlock(this::isFurnaceBlock, 10, 3, 6);
-        this.rememberedCrop = this.findNearestMatureCrop();
+        if (!this.isValidHarvestTarget(this.rememberedLog, true) || rescanResources) {
+            this.rememberedLog = this.findNearestHarvestBlock(true);
+            this.lastResourceScanTick = this.tickCount;
+        }
+        if (!this.isValidHarvestTarget(this.rememberedOre, false) || rescanResources) {
+            this.rememberedOre = this.findNearestHarvestBlock(false);
+            this.lastResourceScanTick = this.tickCount;
+        }
+        if (!this.isRememberedUtilityBlockValid(this.rememberedBed, this::isBedBlock) || rescanUtilities) {
+            this.rememberedBed = this.findNearestUtilityBlock(this::isBedBlock, 10, 3, 6);
+            this.lastUtilityScanTick = this.tickCount;
+        }
+        if (!this.isRememberedUtilityBlockValid(this.rememberedChest, this::isStorageBlock) || rescanUtilities) {
+            this.rememberedChest = this.findNearestUtilityBlock(this::isStorageBlock, 10, 3, 6);
+            this.lastUtilityScanTick = this.tickCount;
+        }
+        if (!this.isRememberedUtilityBlockValid(this.rememberedCraftingTable, this::isCraftingBlock) || rescanUtilities) {
+            this.rememberedCraftingTable = this.findNearestUtilityBlock(this::isCraftingBlock, 10, 3, 6);
+            this.lastUtilityScanTick = this.tickCount;
+        }
+        if (!this.isRememberedUtilityBlockValid(this.rememberedFurnace, this::isFurnaceBlock) || rescanUtilities) {
+            this.rememberedFurnace = this.findNearestUtilityBlock(this::isFurnaceBlock, 10, 3, 6);
+            this.lastUtilityScanTick = this.tickCount;
+        }
+        if (rescanCrop || this.rememberedCrop == null || !(this.level().getBlockState(this.rememberedCrop).getBlock() instanceof CropBlock)) {
+            this.rememberedCrop = this.findNearestMatureCrop();
+            this.lastCropScanTick = this.tickCount;
+        }
 
         int nearbyPlayers = this.level().getEntitiesOfClass(Player.class, scanBox, player -> player.isAlive() && !player.isSpectator()).size();
         List<String> notices = new ArrayList<>();
@@ -3319,7 +3355,9 @@ public class AIPlayerEntity extends Zombie {
     private void markPersistentDirty() {
         if (!this.level().isClientSide()) {
             this.persistentStateDirty = true;
-            this.syncClientTelemetry();
+            if (this.tickCount - this.lastTelemetrySyncTick >= TELEMETRY_SYNC_INTERVAL) {
+                this.syncClientTelemetry();
+            }
         }
     }
 
@@ -3627,6 +3665,7 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private void syncClientTelemetry() {
+        this.lastTelemetrySyncTick = this.tickCount;
         this.entityData.set(DATA_STATUS, this.clipSyncText(this.buildClientStatusLine()));
         this.entityData.set(DATA_OBSERVATION, this.clipSyncText(this.lastObservation == null || this.lastObservation.isBlank() ? DEFAULT_OBSERVATION : this.lastObservation));
         this.entityData.set(DATA_INVENTORY, this.clipSyncText(this.getInventoryPreview()));
