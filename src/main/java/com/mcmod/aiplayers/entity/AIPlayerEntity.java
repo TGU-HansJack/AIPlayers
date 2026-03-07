@@ -3,6 +3,9 @@ package com.mcmod.aiplayers.entity;
 import com.mcmod.aiplayers.ai.AIServiceManager;
 import com.mcmod.aiplayers.ai.AIServiceResponse;
 import com.mcmod.aiplayers.system.AILongTermMemoryStore;
+import com.mcmod.aiplayers.system.AIAgentPipeline;
+import com.mcmod.aiplayers.system.AIAgentPlan;
+import com.mcmod.aiplayers.system.AIAgentWorldState;
 import com.mcmod.aiplayers.system.AITaskCoordinator;
 import com.mcmod.aiplayers.system.BlueprintRegistry;
 import com.mcmod.aiplayers.system.BlueprintTemplate;
@@ -114,6 +117,10 @@ public class AIPlayerEntity extends Zombie {
     private String activeBlueprintId = DEFAULT_BLUEPRINT_ID;
     private UUID pendingDeliveryReceiverId;
     private String pendingDeliveryRequest;
+    private String latestAgentGoal = "保持警戒";
+    private String latestAgentPlanSummary = "观察环境 -> 等待下一步";
+    private String latestAgentReasoning = "本地规则";
+    private String lastAgentLearnKey = "";
 
     public AIPlayerEntity(EntityType<? extends Zombie> entityType, Level level) {
         super(entityType, level);
@@ -170,6 +177,7 @@ public class AIPlayerEntity extends Zombie {
 
         if (this.tickCount % SCAN_INTERVAL == 0) {
             this.scanSurroundings();
+            this.runAgentPipeline();
         }
 
         this.tickActionState();
@@ -434,6 +442,7 @@ public class AIPlayerEntity extends Zombie {
                 + "\uff1b\u751f\u547d\uff1a" + Math.round(this.getHealth()) + "/" + Math.round(this.getMaxHealth())
                 + "\uff1b\u80cc\u5305\uff1a" + this.getUsedBackpackSlots() + "/" + BACKPACK_SIZE
                 + "\uff1b\u7269\u8d44\uff1a" + this.getInventoryPreview()
+                + "\uff1b\u76ee\u6807\uff1a" + this.latestAgentGoal
                 + "\uff1b\u8bb0\u5fc6\uff1a" + this.getMemorySummary()
                 + "\uff1b\u89c4\u5212\uff1a" + this.getPlanSummary()
                 + "\uff1b\u4fa6\u5bdf\uff1a" + this.getObservationSummary()
@@ -454,33 +463,7 @@ public class AIPlayerEntity extends Zombie {
     }
 
     public String getPlanSummary() {
-        String blueprintName = BlueprintRegistry.get(this.activeBlueprintId).displayName();
-        AIPlayerMode currentMode = this.safeMode();
-        int teamSize = AITaskCoordinator.getTeamSize(this, currentMode, 24.0D);
-        return switch (currentMode) {
-            case IDLE -> this.pendingAiResponse ? "等待当前对话回复 -> 保持警戒" : "原地待命 -> 观察附近玩家和威胁";
-            case FOLLOW -> {
-                ServerPlayer owner = this.getOwnerPlayer();
-                yield owner == null
-                        ? "等待重新绑定主人 -> 原地观察"
-                        : (this.distanceToSqr(owner) > 9.0D
-                                ? "靠近主人@" + this.formatPos(owner.blockPosition()) + " -> 保持 3 格跟随 -> 观察威胁"
-                                : "保持主人附近阵型 -> 看向主人 -> 侦察周围");
-            }
-            case GUARD -> {
-                ServerPlayer owner = this.getOwnerPlayer();
-                yield owner == null
-                        ? "等待重新绑定主人 -> 维持警戒"
-                        : "护卫主人@" + this.formatPos(owner.blockPosition()) + " -> 优先处理敌对生物 -> 补位跟随";
-            }
-            case GATHER_WOOD -> "前往" + this.describePlanTarget(this.rememberedLog, "附近树木") + " -> 抬头定位原木 -> 必要时跳跃补位 -> 采集并收纳";
-            case MINE -> "前往" + this.describePlanTarget(this.rememberedOre, "附近矿点") + " -> 选择可开采位置 -> 必要时下蹲稳位 -> 开采并收纳";
-            case EXPLORE -> "随机探索新区域 -> 记录关键位置 -> 遇敌优先脱战或反击";
-            case BUILD_SHELTER -> this.countAvailableBuildingUnits() < 12
-                    ? "建材不足 -> 先去砍树 -> 转化木板 -> 返回锚点搭建避难所"
-                    : "前往锚点" + this.describePlanTarget(this.shelterAnchor, "当前位置") + " -> 封墙封顶 -> 完成避难所";
-            case SURVIVE -> "优先战斗自保 -> 低血吃面包 -> 白天采集探索 -> 夜晚建造避难所";
-        };
+        return this.latestAgentPlanSummary;
     }
 
     private String applyApiDirective(ServerPlayer speaker, AIServiceResponse response) {
@@ -503,6 +486,66 @@ public class AIPlayerEntity extends Zombie {
         }
 
         return result;
+    }
+
+    private void runAgentPipeline() {
+        AIAgentPlan plan = AIAgentPipeline.evaluate(this);
+        this.latestAgentGoal = plan.goal();
+        this.latestAgentReasoning = plan.reasoning();
+        this.latestAgentPlanSummary = plan.summary();
+        this.setGoalNote(plan.goal());
+        AILongTermMemoryStore.updateNote(this, "pipeline_goal", plan.goal());
+        AILongTermMemoryStore.updateNote(this, "pipeline_reasoning", plan.reasoning());
+
+        AIPlayerMode recommendedMode = plan.recommendedMode();
+        if (recommendedMode != null && this.shouldAdoptPipelineMode(recommendedMode)) {
+            this.setMode(recommendedMode);
+        }
+
+        String learnKey = plan.goal() + "|" + this.safeModeCommandName() + "|" + plan.reasoning();
+        if (!learnKey.equals(this.lastAgentLearnKey)) {
+            this.lastAgentLearnKey = learnKey;
+            this.remember("规划", plan.goal() + "（" + plan.source() + "）");
+            AILongTermMemoryStore.record(this, "规划", plan.goal() + " -> " + plan.reasoning());
+        }
+    }
+
+    private boolean shouldAdoptPipelineMode(AIPlayerMode recommendedMode) {
+        if (recommendedMode == this.safeMode()) {
+            return false;
+        }
+        return switch (this.safeMode()) {
+            case IDLE, FOLLOW, GUARD, EXPLORE, SURVIVE -> true;
+            case GATHER_WOOD -> !this.hasRememberedHarvestTarget(true) && recommendedMode == AIPlayerMode.EXPLORE;
+            case MINE -> !this.hasRememberedHarvestTarget(false) && recommendedMode == AIPlayerMode.EXPLORE;
+            case BUILD_SHELTER -> this.countAvailableBuildingUnits() < 12 && recommendedMode == AIPlayerMode.GATHER_WOOD;
+        };
+    }
+
+    public AIAgentWorldState buildAgentWorldState() {
+        ServerPlayer owner = this.getOwnerPlayer();
+        int usedSlots = this.getUsedBackpackSlots();
+        return new AIAgentWorldState(
+                this.safeMode(),
+                owner != null,
+                owner == null ? Double.MAX_VALUE : Math.sqrt(this.distanceToSqr(owner)),
+                this.observedHostile != null && this.observedHostile.isAlive(),
+                this.getHealth() <= 10.0F,
+                this.isInWater() || this.isUnderWater() || this.isInLava(),
+                this.stuckNavigationTicks >= NAVIGATION_STUCK_THRESHOLD / 2,
+                this.pendingDeliveryRequest != null && !this.pendingDeliveryRequest.isBlank(),
+                this.hasRememberedHarvestTarget(true),
+                this.hasRememberedHarvestTarget(false),
+                (this.level().getDayTime() % 24000L) >= 12500L,
+                this.countAvailableBuildingUnits(),
+                usedSlots,
+                Math.max(0, BACKPACK_SIZE - usedSlots),
+                this.getObservationSummary(),
+                this.getInventoryPreview());
+    }
+
+    public boolean hasRememberedHarvestTarget(boolean woodTask) {
+        return woodTask ? this.isValidHarvestTarget(this.rememberedLog, true) : this.isValidHarvestTarget(this.rememberedOre, false);
     }
 
     private void runModeLogic() {
@@ -2374,6 +2417,7 @@ public class AIPlayerEntity extends Zombie {
         return "模式：" + this.safeModeDisplayName()
                 + " | 生命：" + Math.round(this.getHealth()) + "/" + Math.round(this.getMaxHealth())
                 + " | 背包：" + this.getUsedBackpackSlots() + "/" + BACKPACK_SIZE
+                + " | 目标：" + this.latestAgentGoal
                 + (this.pendingDeliveryRequest != null ? " | 正在交付" : "");
     }
 
