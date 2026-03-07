@@ -31,6 +31,8 @@ final class PlayerMovementController {
     private long lastReplanTick;
     private long lastPathRequestTick;
     private long lastStuckCheckTick;
+    private long lastNodeActionTick;
+    private static final int NODE_ACTION_COOLDOWN_TICKS = 6;
 
     PlayerMovementController(AIPlayerEntity entity) {
         this.entity = entity;
@@ -89,6 +91,8 @@ final class PlayerMovementController {
         this.pathStatus = "空闲";
         this.stuckTicks = 0;
         this.lastStuckCheckTick = 0L;
+        this.lastNodeActionTick = 0L;
+        this.entity.runtimeClearWasdOverride();
         this.entity.setZza(0.0F);
         this.entity.setXxa(0.0F);
         this.entity.setSpeed(0.0F);
@@ -106,7 +110,8 @@ final class PlayerMovementController {
         if (this.activePath.isEmpty()) {
             boolean requested = this.requestPathTo(this.targetPos, this.speedModifier);
             if (this.activePath.isEmpty()) {
-                this.pathStatus = requested ? "无可用路径" : this.pathStatus;
+                this.pathStatus = requested ? "无可用路径，切换直控逼近" : this.pathStatus;
+                driveDirectFallback();
                 return;
             }
         }
@@ -114,6 +119,10 @@ final class PlayerMovementController {
             this.pathIndex = this.activePath.size() - 1;
         }
 
+        PathNode currentNode = this.activePath.get(this.pathIndex);
+        if (!tryHandleNodeAction(currentNode)) {
+            return;
+        }
         Vec3 waypoint = chooseWaypoint();
         detectStuckAndRecover(waypoint);
         if (this.targetPos == null) {
@@ -128,9 +137,7 @@ final class PlayerMovementController {
 
         double distanceToWaypoint = this.entity.distanceToSqr(waypoint);
         double appliedSpeed = computeAppliedSpeed(distanceToWaypoint);
-        this.entity.getLookControl().setLookAt(waypoint.x, waypoint.y + 0.6D, waypoint.z, 30.0F, 30.0F);
-        this.entity.getMoveControl().setWantedPosition(waypoint.x, waypoint.y, waypoint.z, appliedSpeed);
-        this.entity.setSprinting(appliedSpeed > 1.12D && distanceToWaypoint > 10.0D);
+        applyWasdToward(waypoint, appliedSpeed, currentNode.jumpRequired() || liquidEscape != null);
 
         if (liquidEscape == null) {
             this.pathStatus = this.pathIndex < this.activePath.size() - 1
@@ -190,6 +197,8 @@ final class PlayerMovementController {
         this.pathIndex = 0;
         this.stuckTicks = 0;
         this.lastStuckCheckTick = 0L;
+        this.lastNodeActionTick = 0L;
+        this.entity.runtimeClearWasdOverride();
         this.entity.setZza(0.0F);
         this.entity.setXxa(0.0F);
         this.entity.setSpeed(0.0F);
@@ -219,21 +228,21 @@ final class PlayerMovementController {
 
     private double computeAppliedSpeed(double distanceToWaypoint) {
         if (this.entity.isInWater() || this.entity.isUnderWater() || this.entity.isInLava()) {
-            return Math.min(this.speedModifier, 0.58D);
+            return Math.min(this.speedModifier, 0.78D);
         }
         if (distanceToWaypoint <= 0.36D) {
-            return Math.min(this.speedModifier, 0.62D);
+            return Math.min(this.speedModifier, 0.72D);
         }
         if (distanceToWaypoint <= 2.25D) {
-            return Math.min(this.speedModifier, 0.82D);
-        }
-        if (distanceToWaypoint <= 9.0D) {
             return Math.min(this.speedModifier, 0.96D);
         }
-        if (distanceToWaypoint >= 64.0D) {
-            return Mth.clamp(this.speedModifier, 1.0D, 1.18D);
+        if (distanceToWaypoint <= 9.0D) {
+            return Math.min(this.speedModifier, 1.08D);
         }
-        return Math.min(this.speedModifier, 1.02D);
+        if (distanceToWaypoint >= 64.0D) {
+            return Mth.clamp(this.speedModifier, 1.05D, 1.32D);
+        }
+        return Math.min(this.speedModifier, 1.18D);
     }
 
     private Vec3 selectLiquidEscapeWaypoint() {
@@ -276,7 +285,8 @@ final class PlayerMovementController {
         double offsetX = Mth.cos(yaw) * side;
         double offsetZ = -Mth.sin(yaw) * side;
         Vec3 sidestep = this.entity.position().add(offsetX, 0.0D, offsetZ);
-        this.entity.getMoveControl().setWantedPosition(sidestep.x, sidestep.y, sidestep.z, Math.max(0.65D, Math.min(this.speedModifier, 0.92D)));
+        float sidestepYaw = (float) (Mth.atan2(offsetZ, offsetX) * (180.0F / (float) Math.PI)) - 90.0F;
+        this.entity.runtimeSetWasdControl(0.72F, side > 0 ? 0.35F : -0.35F, 0.085F, sidestepYaw, false, this.entity.onGround());
 
         if (this.stuckTicks >= LOCAL_REPOSITION_TICKS && this.targetPos != null) {
             BlockPos localStandPos = this.entity.runtimeResolveMovementTarget(this.targetPos);
@@ -308,6 +318,115 @@ final class PlayerMovementController {
                 this.pathStatus = "团队路径预算忙，等待重算窗口";
             }
         }
+    }
+
+    private boolean tryHandleNodeAction(PathNode node) {
+        if (node == null || node.action() == PathNodeAction.NONE || node.actionPos() == null) {
+            return true;
+        }
+        BlockPos actionPos = node.actionPos();
+        boolean nearAction = this.entity.runtimeIsWithin(actionPos, 6.25D);
+        if (!nearAction) {
+            Vec3 center = Vec3.atCenterOf(actionPos);
+            applyWasdToward(center, 0.85D, node.jumpRequired());
+            this.pathStatus = "接近路径动作点";
+            return false;
+        }
+
+        long now = this.entity.level().getGameTime();
+        if (now - this.lastNodeActionTick < NODE_ACTION_COOLDOWN_TICKS) {
+            this.pathStatus = "动作冷却中";
+            applyWasdToward(Vec3.atCenterOf(actionPos), 0.32D, false);
+            return false;
+        }
+        this.lastNodeActionTick = now;
+
+        return switch (node.action()) {
+            case BREAK_BLOCK -> {
+                boolean done = !this.entity.runtimeCanBreakPathBlock(actionPos) || this.entity.runtimeBreakPathNavigationBlock(actionPos);
+                if (!done) {
+                    this.pathStatus = "路径清障中";
+                }
+                yield done;
+            }
+            case PLACE_SUPPORT -> {
+                boolean done = !this.entity.runtimeCanPlacePathSupport(actionPos) || this.entity.runtimePlacePathSupport(actionPos);
+                if (!done) {
+                    this.pathStatus = "路径搭桥中";
+                }
+                yield done;
+            }
+            case JUMP_ASCEND -> true;
+            case NONE -> true;
+        };
+    }
+
+    private void applyWasdToward(Vec3 waypoint, double speedHint, boolean jump) {
+        Vec3 current = this.entity.position();
+        double dx = waypoint.x - current.x;
+        double dz = waypoint.z - current.z;
+        if (dx * dx + dz * dz < 1.0E-4D) {
+            this.entity.runtimeSetWasdControl(0.0F, 0.0F, 0.0F, this.entity.getYRot(), false, false);
+            return;
+        }
+        float targetYaw = (float) (Mth.atan2(dz, dx) * (180.0F / (float) Math.PI)) - 90.0F;
+        float yawDelta = Mth.wrapDegrees(targetYaw - this.entity.getYRot());
+        float radians = yawDelta * ((float) Math.PI / 180.0F);
+        float forward = Mth.clamp(Mth.cos(radians), 0.0F, 1.0F);
+        float strafe = Mth.clamp(-Mth.sin(radians), -0.55F, 0.55F);
+        float absYawDelta = Math.abs(yawDelta);
+        if (absYawDelta > 135.0F) {
+            forward = 0.42F;
+            strafe = yawDelta > 0.0F ? -0.35F : 0.35F;
+        } else if (absYawDelta > 95.0F) {
+            forward = Math.max(0.55F, forward * 0.80F);
+            strafe = Mth.clamp(strafe, -0.18F, 0.18F);
+        } else if (absYawDelta > 60.0F) {
+            forward = Math.max(0.68F, forward * 0.90F);
+            strafe *= 0.20F;
+        } else if (absYawDelta > 35.0F) {
+            forward = Math.max(0.78F, forward);
+            strafe *= 0.25F;
+        } else {
+            forward = Math.max(0.88F, forward);
+        }
+        float speed = (float) Mth.clamp(speedHint <= 0.0D ? 0.28D : speedHint * 0.30D, 0.16D, 0.42D);
+        boolean sprint = speed >= 0.24F
+                && absYawDelta < 34.0F
+                && forward > 0.75F
+                && !this.entity.isInWater()
+                && !this.entity.isUnderWater()
+                && !this.entity.isInLava();
+        boolean shouldJump = (jump && this.entity.onGround() && (waypoint.y - current.y > 0.2D || this.entity.horizontalCollision))
+                || (waypoint.y - current.y > 0.52D && this.entity.onGround());
+        if (this.entity.isInWater() || this.entity.isUnderWater()) {
+            boolean needsAscend = this.entity.isUnderWater()
+                    || this.entity.horizontalCollision
+                    || waypoint.y > current.y + 0.1D;
+            shouldJump = needsAscend;
+            forward = Math.max(forward, 0.84F);
+            strafe = Mth.clamp(strafe, -0.18F, 0.18F);
+            speed = Math.min(speed, 0.20F);
+            sprint = false;
+        }
+        this.entity.runtimeSetWasdControl(forward, strafe, speed, targetYaw, sprint, shouldJump);
+    }
+
+    private void driveDirectFallback() {
+        if (this.targetPos == null) {
+            return;
+        }
+        BlockPos resolved = this.entity.runtimeResolveMovementTarget(this.targetPos);
+        Vec3 fallback = Vec3.atCenterOf(resolved != null ? resolved : this.targetPos);
+        detectStuckAndRecover(fallback);
+        if (this.targetPos == null) {
+            return;
+        }
+        double distance = this.entity.distanceToSqr(fallback);
+        double speedHint = Math.max(0.82D, computeAppliedSpeed(distance));
+        boolean shouldJump = this.entity.horizontalCollision || fallback.y - this.entity.getY() > 0.48D;
+        applyWasdToward(fallback, speedHint, shouldJump);
+        this.pathStatus = "路径空闲兜底：直控逼近目标";
     }
 
     private boolean isNearWaypoint(Vec3 waypoint, double maxXzDistanceSqr, double maxYAbs) {

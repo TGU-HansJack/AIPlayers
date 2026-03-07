@@ -2,16 +2,21 @@ package com.mcmod.aiplayers.entity;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import net.minecraft.core.BlockPos;
+import java.util.Map;
+import java.util.PriorityQueue;
 import net.minecraft.core.Direction;
-import net.minecraft.world.level.pathfinder.Path;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.Vec3;
 
 public final class AgentPathPlanner {
-    private static final int MAX_CANDIDATE_TARGETS = 10;
+    private static final int MAX_CANDIDATE_TARGETS = 24;
     private static final int MAX_SMOOTH_LOOKAHEAD = 4;
+    private static final int SEARCH_NODE_LIMIT = 1800;
+    private static final int MAX_STEP_HEIGHT = 1;
+    private static final int MAX_DROP_HEIGHT = 2;
 
     private AgentPathPlanner() {
     }
@@ -27,9 +32,10 @@ public final class AgentPathPlanner {
         List<BlockPos> candidates = collectCandidateTargets(entity, target);
         List<PathNode> bestNodes = List.of();
         double bestScore = Double.MAX_VALUE;
+        CustomNodeEvaluator evaluator = new CustomNodeEvaluator(entity);
 
         for (BlockPos candidate : candidates) {
-            List<PathNode> nodes = computeRaw(entity, candidate);
+            List<PathNode> nodes = computeRaw(entity, candidate, evaluator);
             double score = scorePath(entity, target, candidate, nodes);
             if (score < bestScore) {
                 bestScore = score;
@@ -39,8 +45,10 @@ public final class AgentPathPlanner {
 
         if (bestNodes.isEmpty()) {
             BlockPos resolved = entity.runtimeResolveMovementTarget(target);
-            BlockPos fallback = resolved != null ? resolved : target;
-            return List.of(new PathNode(Vec3.atCenterOf(fallback)));
+            if (resolved != null && entity.runtimeCanStandAt(resolved, true)) {
+                return List.of(PathNode.move(Vec3.atCenterOf(resolved)));
+            }
+            return List.of();
         }
         return smooth(entity, bestNodes);
     }
@@ -51,19 +59,38 @@ public final class AgentPathPlanner {
         addCandidate(candidates, resolved);
         addCandidate(candidates, target);
         for (Direction direction : Direction.Plane.HORIZONTAL) {
-            addCandidate(candidates, target.relative(direction));
-            addCandidate(candidates, target.relative(direction).below());
-            addCandidate(candidates, target.relative(direction, 2));
-            addCandidate(candidates, target.relative(direction, 2).below());
-            addCandidate(candidates, target.relative(direction).above());
+            for (int step = 1; step <= 4; step++) {
+                BlockPos lateral = target.relative(direction, step);
+                addCandidate(candidates, lateral);
+                addCandidate(candidates, lateral.above());
+                addCandidate(candidates, lateral.below());
+                addCandidate(candidates, lateral.below().below());
+            }
         }
         addCandidate(candidates, target.north().east());
         addCandidate(candidates, target.north().west());
         addCandidate(candidates, target.south().east());
         addCandidate(candidates, target.south().west());
+        addCandidate(candidates, target.north(2).east(2));
+        addCandidate(candidates, target.north(2).west(2));
+        addCandidate(candidates, target.south(2).east(2));
+        addCandidate(candidates, target.south(2).west(2));
+
+        for (int radius = 1; radius <= 3; radius++) {
+            for (int x = -radius; x <= radius; x++) {
+                for (int z = -radius; z <= radius; z++) {
+                    if (Math.abs(x) != radius && Math.abs(z) != radius) {
+                        continue;
+                    }
+                    for (int y = -2; y <= 2; y++) {
+                        addCandidate(candidates, target.offset(x, y, z));
+                    }
+                }
+            }
+        }
 
         return candidates.stream()
-                .filter(candidate -> candidate.equals(target) || entity.runtimeCanStandAt(candidate))
+                .filter(candidate -> candidate.equals(target) || entity.runtimeCanStandAt(candidate, true))
                 .sorted(Comparator
                         .comparingDouble((BlockPos candidate) -> candidate.distSqr(target))
                         .thenComparingDouble(candidate -> entity.distanceToSqr(Vec3.atCenterOf(candidate))))
@@ -77,18 +104,48 @@ public final class AgentPathPlanner {
         }
     }
 
-    private static List<PathNode> computeRaw(AIPlayerEntity entity, BlockPos target) {
-        List<PathNode> nodes = new ArrayList<>();
-        Path path = entity.getNavigation().createPath(target, 0);
-        if (path != null && path.getNodeCount() > 0) {
-            for (int index = path.getNextNodeIndex(); index < path.getNodeCount(); index++) {
-                nodes.add(new PathNode(path.getEntityPosAtNode(entity, index)));
+    private static List<PathNode> computeRaw(AIPlayerEntity entity, BlockPos target, CustomNodeEvaluator evaluator) {
+        BlockPos start = entity.runtimeResolveMovementTarget(entity.blockPosition());
+        if (start == null) {
+            start = entity.blockPosition();
+        }
+        if (entity.runtimeCanDirectlyTraverse(entity.position(), Vec3.atCenterOf(target))) {
+            return List.of(PathNode.move(Vec3.atCenterOf(target)));
+        }
+
+        PriorityQueue<SearchNode> frontier = new PriorityQueue<>(Comparator.comparingDouble(SearchNode::fScore));
+        Map<BlockPos, SearchNode> best = new HashMap<>();
+        SearchNode startNode = new SearchNode(start, 0.0D, heuristic(start, target), null, PathNodeAction.NONE, null, false);
+        frontier.add(startNode);
+        best.put(start, startNode);
+
+        int expansions = 0;
+        while (!frontier.isEmpty() && expansions < SEARCH_NODE_LIMIT) {
+            SearchNode current = frontier.poll();
+            expansions++;
+            if (hasReached(current.pos(), target)) {
+                return buildPath(current);
+            }
+            for (PathStep step : neighbors(entity, current.pos(), evaluator)) {
+                double nextG = current.gScore() + step.cost();
+                SearchNode previous = best.get(step.to());
+                if (previous != null && previous.gScore() <= nextG) {
+                    continue;
+                }
+                SearchNode next = new SearchNode(
+                        step.to(),
+                        nextG,
+                        nextG + heuristic(step.to(), target),
+                        current,
+                        step.action(),
+                        step.actionPos(),
+                        step.jumpRequired());
+                best.put(step.to(), next);
+                frontier.add(next);
             }
         }
-        if (nodes.isEmpty() && entity.runtimeCanDirectlyTraverse(entity.position(), Vec3.atCenterOf(target))) {
-            nodes.add(new PathNode(Vec3.atCenterOf(target)));
-        }
-        return nodes;
+
+        return List.of();
     }
 
     private static double scorePath(AIPlayerEntity entity, BlockPos originalTarget, BlockPos actualTarget, List<PathNode> nodes) {
@@ -113,9 +170,18 @@ public final class AgentPathPlanner {
         Vec3 anchor = entity.position();
         int index = 0;
         while (index < nodes.size()) {
+            if (nodes.get(index).action() != PathNodeAction.NONE) {
+                smoothed.add(nodes.get(index));
+                anchor = nodes.get(index).position();
+                index++;
+                continue;
+            }
             int bestIndex = index;
             int limit = Math.min(nodes.size() - 1, index + MAX_SMOOTH_LOOKAHEAD);
             for (int probe = limit; probe > index; probe--) {
+                if (nodes.get(probe).action() != PathNodeAction.NONE) {
+                    continue;
+                }
                 if (entity.runtimeCanDirectlyTraverse(anchor, nodes.get(probe).position())) {
                     bestIndex = probe;
                     break;
@@ -126,5 +192,103 @@ public final class AgentPathPlanner {
             index = bestIndex + 1;
         }
         return smoothed;
+    }
+
+    private static List<PathStep> neighbors(AIPlayerEntity entity, BlockPos from, CustomNodeEvaluator evaluator) {
+        List<PathStep> steps = new ArrayList<>();
+        boolean fromWater = evaluator.isWaterNode(from);
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos base = from.relative(direction);
+
+            BlockPos same = base;
+            if (evaluator.canStandAt(same, true) && !evaluator.isLavaNode(same)) {
+                steps.add(new PathStep(same, evaluator.movementPenalty(same, false, PathNodeAction.NONE), PathNodeAction.NONE, null, false));
+            }
+
+            for (int up = 1; up <= MAX_STEP_HEIGHT; up++) {
+                BlockPos upPos = base.above(up);
+                if (evaluator.canStandAt(upPos, true) && !evaluator.isLavaNode(upPos)) {
+                    steps.add(new PathStep(upPos, evaluator.movementPenalty(upPos, true, PathNodeAction.JUMP_ASCEND), PathNodeAction.JUMP_ASCEND, null, true));
+                    break;
+                }
+            }
+
+            for (int down = 1; down <= MAX_DROP_HEIGHT; down++) {
+                BlockPos downPos = base.below(down);
+                if (evaluator.canStandAt(downPos, true) && !evaluator.isLavaNode(downPos)) {
+                    steps.add(new PathStep(downPos, evaluator.movementPenalty(downPos, false, PathNodeAction.NONE) + 0.2D * down, PathNodeAction.NONE, null, false));
+                    break;
+                }
+            }
+
+            if (fromWater && evaluator.isWaterNode(base) && !evaluator.isLavaNode(base)) {
+                steps.add(new PathStep(base, 1.7D, PathNodeAction.NONE, null, true));
+            }
+
+            BlockPos feetBlock = base;
+            BlockPos headBlock = base.above();
+            if (evaluator.canBreakForPath(feetBlock) || evaluator.canBreakForPath(headBlock)) {
+                BlockPos clearTarget = evaluator.canBreakForPath(feetBlock) ? feetBlock : headBlock;
+                if (evaluator.canStandAt(base, true) || evaluator.isWaterNode(base)) {
+                    PathNodeAction action = PathNodeAction.BREAK_BLOCK;
+                    steps.add(new PathStep(base, evaluator.movementPenalty(base, false, action), action, clearTarget, false));
+                }
+            }
+
+            BlockPos supportPos = base.below();
+            if (evaluator.canPlaceSupportAt(supportPos) && evaluator.canStandAt(base, true)) {
+                PathNodeAction action = PathNodeAction.PLACE_SUPPORT;
+                steps.add(new PathStep(base, evaluator.movementPenalty(base, true, action), action, supportPos, true));
+            }
+        }
+        return steps;
+    }
+
+    private static double heuristic(BlockPos from, BlockPos to) {
+        return Math.abs(from.getX() - to.getX())
+                + Math.abs(from.getY() - to.getY()) * 1.35D
+                + Math.abs(from.getZ() - to.getZ());
+    }
+
+    private static boolean hasReached(BlockPos pos, BlockPos target) {
+        int dx = Math.abs(pos.getX() - target.getX());
+        int dy = Math.abs(pos.getY() - target.getY());
+        int dz = Math.abs(pos.getZ() - target.getZ());
+        return dx <= 1 && dz <= 1 && dy <= 1;
+    }
+
+    private static List<PathNode> buildPath(SearchNode tail) {
+        List<PathNode> reversed = new ArrayList<>();
+        SearchNode cursor = tail;
+        while (cursor != null) {
+            reversed.add(PathNode.withAction(Vec3.atCenterOf(cursor.pos()), cursor.action(), cursor.actionPos(), cursor.jumpRequired()));
+            cursor = cursor.parent();
+        }
+        List<PathNode> path = new ArrayList<>(reversed.size());
+        for (int i = reversed.size() - 1; i >= 0; i--) {
+            path.add(reversed.get(i));
+        }
+        if (!path.isEmpty()) {
+            path.remove(0);
+        }
+        return path;
+    }
+
+    private record SearchNode(
+            BlockPos pos,
+            double gScore,
+            double fScore,
+            SearchNode parent,
+            PathNodeAction action,
+            BlockPos actionPos,
+            boolean jumpRequired) {
+    }
+
+    private record PathStep(
+            BlockPos to,
+            double cost,
+            PathNodeAction action,
+            BlockPos actionPos,
+            boolean jumpRequired) {
     }
 }

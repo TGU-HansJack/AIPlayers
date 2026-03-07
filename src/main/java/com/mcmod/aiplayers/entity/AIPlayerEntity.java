@@ -112,6 +112,7 @@ public class AIPlayerEntity extends Zombie {
     private static final double FAST_FOLLOW_DISTANCE_SQR = 12.0D * 12.0D;
     private static final double TELEPORT_FOLLOW_DISTANCE_SQR = 32.0D * 32.0D;
     private static final int ALERT_COOLDOWN_TICKS = 120;
+    private static final float WASD_MAX_YAW_STEP = 24.0F;
 
     private final NonNullList<ItemStack> backpack = NonNullList.withSize(BACKPACK_SIZE, ItemStack.EMPTY);
     private final List<String> memory = new ArrayList<>();
@@ -174,6 +175,14 @@ public class AIPlayerEntity extends Zombie {
     private int lastUtilityScanTick;
     private int lastCropScanTick;
     private int lastTelemetrySyncTick = -TELEMETRY_SYNC_INTERVAL;
+    private float pendingWasdForward;
+    private float pendingWasdStrafe;
+    private float pendingWasdSpeed;
+    private float pendingWasdTargetYaw;
+    private boolean pendingWasdSprint;
+    private boolean pendingWasdJump;
+    private boolean pendingWasdJumpQueued;
+    private boolean wasdOverrideActive;
 
     public AIPlayerEntity(EntityType<? extends Zombie> entityType, Level level) {
         super(entityType, level);
@@ -1006,8 +1015,7 @@ public class AIPlayerEntity extends Zombie {
             return;
         }
 
-        double goalDistanceSqr = this.distanceToSqr(Vec3.atCenterOf(this.activeNavigationTarget));
-        if (goalDistanceSqr <= 4.0D) {
+        if (this.agentRuntime.movementController().hasReachedTarget(this.activeNavigationTarget)) {
             this.resetNavigationState();
             return;
         }
@@ -2782,47 +2790,76 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private BlockPos findApproachPosition(BlockPos target) {
+        if (target == null) {
+            return null;
+        }
         List<BlockPos> candidates = new ArrayList<>();
         for (Direction direction : Direction.Plane.HORIZONTAL) {
-            candidates.add(target.relative(direction));
-            candidates.add(target.relative(direction).below());
-            candidates.add(target.relative(direction).below().below());
-            candidates.add(target.relative(direction, 2));
-            candidates.add(target.relative(direction, 2).below());
+            for (int step = 1; step <= 4; step++) {
+                BlockPos lateral = target.relative(direction, step);
+                candidates.add(lateral);
+                candidates.add(lateral.above());
+                candidates.add(lateral.above().above());
+                candidates.add(lateral.below());
+                candidates.add(lateral.below().below());
+            }
         }
         candidates.add(target.below());
         candidates.add(target.below().below());
+        candidates.add(target.above());
+        candidates.add(target.above().above());
         candidates.add(target.north().east());
         candidates.add(target.north().west());
         candidates.add(target.south().east());
         candidates.add(target.south().west());
+        candidates.add(target.north(2).east(2));
+        candidates.add(target.north(2).west(2));
+        candidates.add(target.south(2).east(2));
+        candidates.add(target.south(2).west(2));
 
         return candidates.stream()
-                .filter(this::canStandAt)
-                .min(Comparator.comparingDouble(pos -> this.distanceToSqr(Vec3.atCenterOf(pos))))
+                .distinct()
+                .filter(pos -> this.canStandAt(pos, true))
+                .min(Comparator.comparingDouble(pos -> this.scoreApproachCandidate(pos, target)))
                 .orElse(null);
     }
 
     private boolean canStandAt(BlockPos pos) {
+        return this.canStandAt(pos, false);
+    }
+
+    private boolean canStandAt(BlockPos pos, boolean allowWater) {
         if (pos == null) {
             return false;
         }
         BlockState feet = this.level().getBlockState(pos);
         BlockState head = this.level().getBlockState(pos.above());
         BlockState floor = this.level().getBlockState(pos.below());
+        boolean feetInWater = this.level().getFluidState(pos).is(FluidTags.WATER);
+        boolean headInWater = this.level().getFluidState(pos.above()).is(FluidTags.WATER);
         boolean feetClear = feet.getCollisionShape(this.level(), pos).isEmpty()
-                && !this.level().getFluidState(pos).is(FluidTags.WATER)
-                && !this.level().getFluidState(pos).is(FluidTags.LAVA);
+                && !this.level().getFluidState(pos).is(FluidTags.LAVA)
+                && (allowWater || !feetInWater);
         boolean headClear = head.getCollisionShape(this.level(), pos.above()).isEmpty()
-                && !this.level().getFluidState(pos.above()).is(FluidTags.WATER)
-                && !this.level().getFluidState(pos.above()).is(FluidTags.LAVA);
+                && !this.level().getFluidState(pos.above()).is(FluidTags.LAVA)
+                && (allowWater || !headInWater);
         boolean floorStable = !floor.getCollisionShape(this.level(), pos.below()).isEmpty()
                 && !floor.is(BlockTags.LEAVES)
                 && !this.level().getFluidState(pos.below()).is(FluidTags.LAVA);
+        if (allowWater && (feetInWater || headInWater)) {
+            return feetClear && headClear;
+        }
         return feetClear && headClear && floorStable;
     }
 
     private BlockPos findWalkablePositionNear(BlockPos center, int horizontalRadius, int verticalRadius) {
+        return this.findWalkablePositionNear(center, horizontalRadius, verticalRadius, false);
+    }
+
+    private BlockPos findWalkablePositionNear(BlockPos center, int horizontalRadius, int verticalRadius, boolean allowWater) {
+        if (center == null) {
+            return null;
+        }
         BlockPos bestPos = null;
         double bestScore = Double.MAX_VALUE;
 
@@ -2830,13 +2867,15 @@ public class AIPlayerEntity extends Zombie {
             for (int y = -verticalRadius; y <= verticalRadius; y++) {
                 for (int z = -horizontalRadius; z <= horizontalRadius; z++) {
                     BlockPos candidate = center.offset(x, y, z);
-                    if (!this.canStandAt(candidate)) {
+                    if (!this.canStandAt(candidate, allowWater)) {
                         continue;
                     }
 
                     double targetDistance = candidate.distSqr(center);
                     double selfDistance = this.distanceToSqr(Vec3.atCenterOf(candidate));
-                    double score = targetDistance * 2.0D + selfDistance;
+                    boolean waterNode = this.level().getFluidState(candidate).is(FluidTags.WATER)
+                            || this.level().getFluidState(candidate.above()).is(FluidTags.WATER);
+                    double score = targetDistance * 2.0D + selfDistance + (waterNode ? 2.5D : 0.0D);
                     if (score < bestScore) {
                         bestScore = score;
                         bestPos = candidate;
@@ -3035,6 +3074,45 @@ public class AIPlayerEntity extends Zombie {
     private boolean isInterestingOre(BlockState state) {
         Identifier key = BuiltInRegistries.BLOCK.getKey(state.getBlock());
         return key != null && (key.getPath().endsWith("_ore") || key.getPath().contains("ancient_debris"));
+    }
+
+    private boolean isSurfacePathBreakable(BlockState state) {
+        if (state == null || state.isAir()) {
+            return false;
+        }
+        return state.is(BlockTags.LEAVES)
+                || state.is(BlockTags.REPLACEABLE_BY_TREES)
+                || state.is(Blocks.SHORT_GRASS)
+                || state.is(Blocks.TALL_GRASS)
+                || state.is(Blocks.FERN)
+                || state.is(Blocks.LARGE_FERN)
+                || state.is(Blocks.DANDELION)
+                || state.is(Blocks.POPPY)
+                || state.is(Blocks.DIRT)
+                || state.is(Blocks.GRASS_BLOCK)
+                || state.is(Blocks.COARSE_DIRT)
+                || state.is(Blocks.PODZOL)
+                || state.is(Blocks.ROOTED_DIRT)
+                || state.is(Blocks.MUD)
+                || state.is(Blocks.CLAY)
+                || state.is(Blocks.GRAVEL)
+                || state.is(Blocks.SAND)
+                || state.is(Blocks.RED_SAND)
+                || state.is(Blocks.SNOW)
+                || state.is(Blocks.SNOW_BLOCK);
+    }
+
+    private Item selectPathSupportItem() {
+        if (this.countBackpackItem(Items.OAK_PLANKS) > 0) {
+            return Items.OAK_PLANKS;
+        }
+        if (this.countBackpackItem(Items.COBBLESTONE) > 0) {
+            return Items.COBBLESTONE;
+        }
+        if (this.countBackpackItem(Items.DIRT) > 0) {
+            return Items.DIRT;
+        }
+        return null;
     }
 
     private boolean isOreResourceItem(ItemStack stack) {
@@ -3981,6 +4059,122 @@ public class AIPlayerEntity extends Zombie {
         return this.placeShelterBlock(pos);
     }
 
+    boolean runtimeCanBreakPathBlock(BlockPos pos) {
+        if (pos == null) {
+            return false;
+        }
+        BlockState state = this.level().getBlockState(pos);
+        if (state.isAir()) {
+            return false;
+        }
+        return this.isBreakableNavigationObstacle(state) || this.isBreakableHarvestObstacle(state, true) || this.isSurfacePathBreakable(state);
+    }
+
+    boolean runtimeBreakPathNavigationBlock(BlockPos pos) {
+        return this.breakAuxiliaryBlock(pos, "已开路@");
+    }
+
+    boolean runtimeCanPlacePathSupport(BlockPos pos) {
+        if (pos == null) {
+            return false;
+        }
+        if (!(this.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        if (!serverLevel.getGameRules().get(GameRules.MOB_GRIEFING)) {
+            return false;
+        }
+        if (!this.level().getBlockState(pos).isAir()) {
+            return false;
+        }
+        BlockState below = this.level().getBlockState(pos.below());
+        return !below.getCollisionShape(this.level(), pos.below()).isEmpty() && this.runtimeHasPathSupportBlocks();
+    }
+
+    boolean runtimeHasPathSupportBlocks() {
+        return this.selectPathSupportItem() != null;
+    }
+
+    boolean runtimePlacePathSupport(BlockPos pos) {
+        if (!this.runtimeCanPlacePathSupport(pos)) {
+            return false;
+        }
+        Item support = this.selectPathSupportItem();
+        if (support == null) {
+            return false;
+        }
+        Block block = (support instanceof BlockItem blockItem) ? blockItem.getBlock() : Blocks.OAK_PLANKS;
+        BlockState placement = block.defaultBlockState();
+        if (!placement.canSurvive(this.level(), pos)) {
+            placement = Blocks.OAK_PLANKS.defaultBlockState();
+        }
+        if (!placement.canSurvive(this.level(), pos)) {
+            return false;
+        }
+        if (!(this.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        this.swing(InteractionHand.MAIN_HAND);
+        serverLevel.setBlock(pos, placement, 3);
+        WorldScanner.invalidateAt(serverLevel, pos);
+        this.consumeBackpackItem(support, 1);
+        this.reportTaskProgress(this.activeTaskName, "已放置路径支撑方块：" + this.formatPos(pos));
+        this.lastObservation = "已搭建路径支撑@" + this.formatPos(pos);
+        return true;
+    }
+
+    void runtimeSetWasdControl(float forward, float strafe, float speed, float targetYaw, boolean sprint, boolean jump) {
+        boolean previousJump = this.pendingWasdJump;
+        this.pendingWasdForward = Mth.clamp(forward, -1.0F, 1.0F);
+        this.pendingWasdStrafe = Mth.clamp(strafe, -1.0F, 1.0F);
+        this.pendingWasdSpeed = Mth.clamp(speed, 0.0F, 0.35F);
+        this.pendingWasdTargetYaw = targetYaw;
+        this.pendingWasdSprint = sprint;
+        this.pendingWasdJump = jump;
+        if (jump && !previousJump) {
+            this.pendingWasdJumpQueued = true;
+        }
+        this.wasdOverrideActive = true;
+    }
+
+    boolean runtimeApplyPendingWasdInput() {
+        if (!this.wasdOverrideActive) {
+            return false;
+        }
+        float yawDelta = Mth.wrapDegrees(this.pendingWasdTargetYaw - this.getYRot());
+        float yawStep = Math.abs(yawDelta) > 65.0F ? WASD_MAX_YAW_STEP * 1.35F : WASD_MAX_YAW_STEP;
+        float nextYaw = Mth.approachDegrees(this.getYRot(), this.pendingWasdTargetYaw, yawStep);
+        this.setYRot(nextYaw);
+        this.setYHeadRot(nextYaw);
+        this.setYBodyRot(nextYaw);
+        this.setZza(this.pendingWasdForward);
+        this.setXxa(this.pendingWasdStrafe);
+        this.setSpeed(this.pendingWasdSpeed);
+        this.setSprinting(this.pendingWasdSprint && this.pendingWasdForward > 0.2F);
+        boolean inLiquid = this.isInWater() || this.isUnderWater() || this.isInLava();
+        boolean canJumpNow = this.jumpCooldown <= 0 && (this.onGround() || inLiquid);
+        boolean holdJumpInLiquid = this.pendingWasdJump && inLiquid && (this.horizontalCollision || this.isUnderWater());
+        if ((this.pendingWasdJumpQueued || holdJumpInLiquid) && canJumpNow) {
+            this.getJumpControl().jump();
+            this.jumpCooldown = inLiquid ? 5 : 7;
+            this.pendingWasdJumpQueued = false;
+        }
+        if (!this.pendingWasdJump) {
+            this.pendingWasdJumpQueued = false;
+        }
+        return true;
+    }
+
+    void runtimeClearWasdOverride() {
+        this.wasdOverrideActive = false;
+        this.pendingWasdForward = 0.0F;
+        this.pendingWasdStrafe = 0.0F;
+        this.pendingWasdSpeed = 0.0F;
+        this.pendingWasdSprint = false;
+        this.pendingWasdJump = false;
+        this.pendingWasdJumpQueued = false;
+    }
+
     void runtimeApplyCoarseMode(AIPlayerMode mode, boolean pin) {
         if (pin) {
             this.playerModePinned = true;
@@ -4007,16 +4201,30 @@ public class AIPlayerEntity extends Zombie {
         if (pos == null) {
             return null;
         }
+        if (this.canStandAt(pos, true)) {
+            return pos;
+        }
         BlockPos approach = this.findApproachPosition(pos);
         if (approach != null) {
             return approach;
         }
-        BlockPos walkable = this.findWalkablePositionNear(pos, 2, 3);
-        return walkable != null ? walkable : pos;
+        BlockPos walkable = this.findWalkablePositionNear(pos, 4, 5, true);
+        if (walkable != null) {
+            return walkable;
+        }
+        BlockPos expanded = this.findWalkablePositionNear(pos, 7, 6, true);
+        if (expanded != null) {
+            return expanded;
+        }
+        return this.findNearbyDryStandPosition(pos, 8, 6);
     }
 
     boolean runtimeCanStandAt(BlockPos pos) {
-        return this.canStandAt(pos);
+        return this.canStandAt(pos, false);
+    }
+
+    boolean runtimeCanStandAt(BlockPos pos, boolean allowWater) {
+        return this.canStandAt(pos, allowWater);
     }
 
     BlockPos runtimeFindNearbyDryStandPosition(BlockPos center, int horizontalRadius, int verticalRadius) {
@@ -4075,10 +4283,22 @@ public class AIPlayerEntity extends Zombie {
                 ServerPlayer owner = this.getOwnerPlayer();
                 yield owner == null ? fallback : this.findWalkablePositionNear(owner.blockPosition(), 1, 2);
             }
-            case "wood" -> this.rememberedLog != null ? this.rememberedLog : TeamKnowledge.findNearestResource(this, ResourceType.WOOD, this.blockPosition());
-            case "ore" -> this.rememberedOre != null ? this.rememberedOre : TeamKnowledge.findNearestResource(this, ResourceType.ORE, this.blockPosition());
-            case "crop" -> this.rememberedCrop != null ? this.rememberedCrop : TeamKnowledge.findNearestResource(this, ResourceType.CROP, this.blockPosition());
-            case "bed" -> this.rememberedBed != null ? this.rememberedBed : TeamKnowledge.findNearestResource(this, ResourceType.BED, this.blockPosition());
+            case "wood" -> {
+                BlockPos target = this.rememberedLog != null ? this.rememberedLog : TeamKnowledge.findNearestResource(this, ResourceType.WOOD, this.blockPosition());
+                yield target == null ? null : this.runtimeResolveMovementTarget(target);
+            }
+            case "ore" -> {
+                BlockPos target = this.rememberedOre != null ? this.rememberedOre : TeamKnowledge.findNearestResource(this, ResourceType.ORE, this.blockPosition());
+                yield target == null ? null : this.runtimeResolveMovementTarget(target);
+            }
+            case "crop" -> {
+                BlockPos target = this.rememberedCrop != null ? this.rememberedCrop : TeamKnowledge.findNearestResource(this, ResourceType.CROP, this.blockPosition());
+                yield target == null ? null : this.runtimeResolveMovementTarget(target);
+            }
+            case "bed" -> {
+                BlockPos target = this.rememberedBed != null ? this.rememberedBed : TeamKnowledge.findNearestResource(this, ResourceType.BED, this.blockPosition());
+                yield target == null ? null : this.runtimeResolveMovementTarget(target);
+            }
             case "delivery_receiver" -> {
                 if (this.pendingDeliveryReceiverId == null || !(this.level() instanceof ServerLevel serverLevel)) {
                     yield fallback;
@@ -4088,8 +4308,17 @@ public class AIPlayerEntity extends Zombie {
                 yield receiver == null ? fallback : this.findWalkablePositionNear(receiver.blockPosition(), 2, 3);
             }
             case "explore" -> this.findExplorationDestination();
-            default -> fallback;
+            default -> fallback == null ? null : this.runtimeResolveMovementTarget(fallback);
         };
+    }
+
+    private double scoreApproachCandidate(BlockPos candidate, BlockPos target) {
+        double selfDistance = this.distanceToSqr(Vec3.atCenterOf(candidate));
+        double targetDistance = candidate.distSqr(target);
+        double verticalDelta = Math.abs(candidate.getY() - target.getY());
+        boolean waterNode = this.level().getFluidState(candidate).is(FluidTags.WATER)
+                || this.level().getFluidState(candidate.above()).is(FluidTags.WATER);
+        return selfDistance + targetDistance * 2.25D + verticalDelta * 0.75D + (waterNode ? 2.5D : 0.0D);
     }
 
     ActionExecutionResult executePlannedAction(PlannedAction action, AgentGoal goal) {
@@ -4153,5 +4382,3 @@ public class AIPlayerEntity extends Zombie {
     private record DeliveryRequest(String label, boolean deliverAll, int requestedCount, Predicate<ItemStack> matcher) {
     }
 }
-
-

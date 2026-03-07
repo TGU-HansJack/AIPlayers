@@ -20,8 +20,8 @@ final class AIPlayerMoveControl extends MoveControl {
     private static final double JUMP_HORIZONTAL_DISTANCE = 1.45D;
     private static final double FRONT_PROBE_DISTANCE = 0.75D;
     private static final double WATER_ASCENT_SPEED = 0.04D;
-    private static final float WALK_SPEED_CAP = 0.10F;
-    private static final float SPRINT_SPEED_CAP = 0.13F;
+    private static final float WALK_SPEED_CAP = 0.14F;
+    private static final float SPRINT_SPEED_CAP = 0.18F;
     private static final float SNEAK_SPEED_CAP = 0.05F;
     private static final float WATER_SPEED_CAP = 0.065F;
 
@@ -37,6 +37,10 @@ final class AIPlayerMoveControl extends MoveControl {
 
     @Override
     public void tick() {
+        if (this.companion.runtimeApplyPendingWasdInput()) {
+            this.operation = Operation.WAIT;
+            return;
+        }
         this.companion.setXxa(0.0F);
         this.companion.setZza(0.0F);
 
