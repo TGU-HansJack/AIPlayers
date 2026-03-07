@@ -45,6 +45,7 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CropBlock;
@@ -52,8 +53,11 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.FluidTags;
 
 public class AIPlayerEntity extends Zombie {
     private static final EntityDataAccessor<String> DATA_AI_NAME = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
@@ -71,6 +75,11 @@ public class AIPlayerEntity extends Zombie {
     private static final int MEMORY_LIMIT = 12;
     private static final int NAVIGATION_STUCK_THRESHOLD = 60;
     private static final double HARVEST_REACH = 4.75D;
+    private static final double RECOVERY_REACH = 3.5D;
+    private static final double FAST_FOLLOW_SPEED = 1.35D;
+    private static final double NORMAL_FOLLOW_SPEED = 1.15D;
+    private static final double FAST_FOLLOW_DISTANCE_SQR = 12.0D * 12.0D;
+    private static final double TELEPORT_FOLLOW_DISTANCE_SQR = 32.0D * 32.0D;
 
     private final NonNullList<ItemStack> backpack = NonNullList.withSize(BACKPACK_SIZE, ItemStack.EMPTY);
     private final List<String> memory = new ArrayList<>();
@@ -100,6 +109,7 @@ public class AIPlayerEntity extends Zombie {
         super(entityType, level);
         this.setPersistenceRequired();
         this.setCanPickUpLoot(false);
+        this.getNavigation().setCanFloat(true);
         this.xpReward = 0;
         this.refreshDisplayName();
     }
@@ -261,10 +271,13 @@ public class AIPlayerEntity extends Zombie {
                 return "你好，我已就绪。" + this.getObservationSummary();
             }
             case HELP -> {
-                return "你可以让我跟随、护卫、砍树、挖矿、探索、建造、生存，也可以让我跳跃、下蹲、抬头、查看记忆或询问当前计划。";
+                return "你可以让我跟随、护卫、砍树、挖矿、探索、建造、生存，也可以让我跳跃、下蹲、抬头、查看背包、脱困、查看记忆或询问当前计划。";
             }
             case STATUS -> {
                 return this.getStatusSummary();
+            }
+            case INVENTORY -> {
+                return "当前背包：" + this.getDetailedInventorySummary();
             }
             case MEMORY -> {
                 return "最近记忆：" + this.getMemorySummary();
@@ -290,7 +303,7 @@ public class AIPlayerEntity extends Zombie {
             case MINE -> {
                 this.assignOwner(speaker);
                 this.setMode(AIPlayerMode.MINE);
-                return "开始挖矿，我会寻找附近裸露矿石。";
+                return "开始挖矿，我会寻找附近矿石，并尝试处理浅层遮挡方块。";
             }
             case EXPLORE -> {
                 this.assignOwner(speaker);
@@ -325,12 +338,15 @@ public class AIPlayerEntity extends Zombie {
             case LOOK_OWNER -> {
                 return this.performAction(AIPlayerAction.LOOK_OWNER);
             }
+            case RECOVER -> {
+                return this.performAction(AIPlayerAction.RECOVER);
+            }
             case STOP -> {
                 this.setMode(AIPlayerMode.IDLE);
                 return "已停止当前任务，进入待命。";
             }
             case UNKNOWN -> {
-                return "我听到了，但没完全理解。你可以说：跟随、护卫、砍树、挖矿、探索、建造、生存、跳跃、下蹲、抬头、记忆、状态、计划、停止。";
+                return "我听到了，但没完全理解。你可以说：跟随、护卫、砍树、挖矿、探索、建造、生存、跳跃、下蹲、抬头、背包、脱困、记忆、状态、计划、停止。";
             }
         }
 
@@ -378,6 +394,13 @@ public class AIPlayerEntity extends Zombie {
                     return "收到，我看向你。";
                 }
                 return "我暂时找不到主人位置。";
+            }
+            case RECOVER -> {
+                if (this.attemptImmediateRecovery()) {
+                    this.remember("动作", "执行脱困");
+                    return "收到，我正在尝试脱困。";
+                }
+                return "我暂时没有发现需要处理的卡点。";
             }
         }
 
@@ -462,6 +485,10 @@ public class AIPlayerEntity extends Zombie {
     private void runModeLogic() {
         this.autoMaintainSurvival();
 
+        if (this.autoRecoverFromHazards()) {
+            return;
+        }
+
         if (this.getTarget() != null && !this.getTarget().isAlive()) {
             this.setTarget(null);
         }
@@ -524,9 +551,14 @@ public class AIPlayerEntity extends Zombie {
         if (farFromGoal && currentPos.distanceToSqr(this.lastNavigationSample) < 0.09D) {
             this.stuckNavigationTicks += SCAN_INTERVAL;
             if (this.stuckNavigationTicks >= NAVIGATION_STUCK_THRESHOLD) {
-                this.lastObservation = "路径受阻，正在重新规划。";
-                this.getNavigation().stop();
-                this.resetNavigationState();
+                if (this.attemptImmediateRecovery()) {
+                    this.stuckNavigationTicks = 0;
+                    this.lastNavigationSample = currentPos;
+                } else {
+                    this.lastObservation = "路径受阻，正在重新规划。";
+                    this.getNavigation().stop();
+                    this.resetNavigationState();
+                }
             }
         } else {
             this.stuckNavigationTicks = 0;
@@ -617,8 +649,18 @@ public class AIPlayerEntity extends Zombie {
         }
 
         double followDistance = guardMode ? 5.0D : 3.0D;
-        if (this.distanceToSqr(owner) > followDistance * followDistance) {
-            this.getNavigation().moveTo(owner, 1.15D);
+        double ownerDistanceSqr = this.distanceToSqr(owner);
+        if (ownerDistanceSqr >= TELEPORT_FOLLOW_DISTANCE_SQR && this.tryTeleportNearOwner(owner)) {
+            return;
+        }
+
+        if (ownerDistanceSqr > followDistance * followDistance) {
+            double speed = ownerDistanceSqr >= FAST_FOLLOW_DISTANCE_SQR ? FAST_FOLLOW_SPEED : NORMAL_FOLLOW_SPEED;
+            if (this.getNavigation().moveTo(owner, speed)) {
+                this.activeNavigationTarget = owner.blockPosition();
+                this.lastNavigationSample = this.position();
+                this.stuckNavigationTicks = 0;
+            }
         } else {
             this.getNavigation().stop();
             this.resetNavigationState();
@@ -663,6 +705,13 @@ public class AIPlayerEntity extends Zombie {
             this.performAction(AIPlayerAction.JUMP);
         }
 
+        BlockPos obstacle = this.findHarvestObstacle(target, woodTask);
+        if (obstacle != null && this.canHarvestFromHere(obstacle)) {
+            if (this.breakAuxiliaryBlock(obstacle, woodTask ? "已清理树叶@" : "已清理遮挡方块@")) {
+                return;
+            }
+        }
+
         if (this.canHarvestFromHere(target)) {
             if (this.harvestBlock(target, woodTask)) {
                 if (woodTask) {
@@ -675,10 +724,11 @@ public class AIPlayerEntity extends Zombie {
             return;
         }
 
-        BlockPos approach = this.findApproachPosition(target);
+        BlockPos focusTarget = obstacle != null ? obstacle : target;
+        BlockPos approach = this.findApproachPosition(focusTarget);
         BlockPos navigationGoal = approach != null ? approach : this.findWalkablePositionNear(target, 2, 3);
         if (navigationGoal == null) {
-            navigationGoal = target;
+            navigationGoal = focusTarget;
         }
 
         if (!this.navigateToPosition(navigationGoal, 1.05D)) {
@@ -790,6 +840,230 @@ public class AIPlayerEntity extends Zombie {
         } else {
             this.performExplore();
         }
+    }
+
+    private boolean autoRecoverFromHazards() {
+        if (!this.isInWater() && !this.isUnderWater() && !this.isInLava()) {
+            return false;
+        }
+
+        BlockPos safePos = this.findNearbyDryStandPosition(this.blockPosition(), 6, 4);
+        if (safePos != null) {
+            this.navigateToPosition(safePos, FAST_FOLLOW_SPEED);
+            this.lastObservation = this.isInLava() ? "掉进危险液体，正在紧急脱困。" : "正在脱离水域。";
+        } else {
+            this.lastObservation = this.isInLava() ? "掉进危险液体，正在尝试上浮。" : "暂时没有找到干燥落脚点，正在上浮。";
+        }
+
+        if (this.jumpCooldown <= 0) {
+            Vec3 motion = this.getDeltaMovement();
+            this.setDeltaMovement(motion.x, Math.max(motion.y, 0.28D), motion.z);
+            this.jumpCooldown = 10;
+        }
+        return true;
+    }
+
+    private boolean attemptImmediateRecovery() {
+        if (this.autoRecoverFromHazards()) {
+            return true;
+        }
+
+        BlockPos blocker = null;
+        if (this.activeNavigationTarget != null) {
+            blocker = this.findNavigationObstacle(this.activeNavigationTarget);
+        }
+        if (blocker == null) {
+            if (this.safeMode() == AIPlayerMode.GATHER_WOOD && this.rememberedLog != null) {
+                blocker = this.findHarvestObstacle(this.rememberedLog, true);
+            } else if (this.safeMode() == AIPlayerMode.MINE && this.rememberedOre != null) {
+                blocker = this.findHarvestObstacle(this.rememberedOre, false);
+            }
+        }
+
+        if (blocker != null && this.canHarvestFromHere(blocker) && this.breakAuxiliaryBlock(blocker, "已清理路径障碍@")) {
+            return true;
+        }
+
+        if (this.activeNavigationTarget != null && this.onGround() && this.jumpCooldown <= 0) {
+            this.performAction(AIPlayerAction.JUMP);
+            this.lastObservation = "尝试跳跃脱困。";
+            return true;
+        }
+
+        return false;
+    }
+
+    private boolean tryTeleportNearOwner(ServerPlayer owner) {
+        BlockPos destination = this.findWalkablePositionNear(owner.blockPosition(), 3, 4);
+        if (destination == null) {
+            destination = this.findNearbyDryStandPosition(owner.blockPosition(), 4, 4);
+        }
+        if (destination == null) {
+            return false;
+        }
+
+        this.teleportTo(destination.getX() + 0.5D, destination.getY(), destination.getZ() + 0.5D);
+        this.getNavigation().stop();
+        this.resetNavigationState();
+        this.lastObservation = "距离过远，已快速跟上主人@" + this.formatPos(destination);
+        return true;
+    }
+
+    private BlockPos findNearbyDryStandPosition(BlockPos center, int horizontalRadius, int verticalRadius) {
+        BlockPos bestPos = null;
+        double bestScore = Double.MAX_VALUE;
+
+        for (int x = -horizontalRadius; x <= horizontalRadius; x++) {
+            for (int y = -verticalRadius; y <= verticalRadius; y++) {
+                for (int z = -horizontalRadius; z <= horizontalRadius; z++) {
+                    BlockPos candidate = center.offset(x, y, z);
+                    if (!this.canStandDryAt(candidate)) {
+                        continue;
+                    }
+
+                    double distance = this.distanceToSqr(Vec3.atCenterOf(candidate));
+                    if (distance < bestScore) {
+                        bestScore = distance;
+                        bestPos = candidate;
+                    }
+                }
+            }
+        }
+
+        return bestPos;
+    }
+
+    private boolean canStandDryAt(BlockPos pos) {
+        return this.canStandAt(pos)
+                && !this.level().getFluidState(pos).is(FluidTags.WATER)
+                && !this.level().getFluidState(pos.above()).is(FluidTags.WATER)
+                && !this.level().getFluidState(pos).is(FluidTags.LAVA)
+                && !this.level().getFluidState(pos.above()).is(FluidTags.LAVA);
+    }
+
+    private BlockPos findNavigationObstacle(BlockPos target) {
+        BlockPos blocker = this.findBlockingBlockOnLine(target);
+        if (blocker == null) {
+            return null;
+        }
+        BlockState state = this.level().getBlockState(blocker);
+        return this.isBreakableNavigationObstacle(state) ? blocker : null;
+    }
+
+    private BlockPos findHarvestObstacle(BlockPos target, boolean woodTask) {
+        BlockPos blocker = this.findBlockingBlockOnLine(target);
+        if (blocker != null && this.isBreakableHarvestObstacle(this.level().getBlockState(blocker), woodTask)) {
+            return blocker;
+        }
+        return this.isExposed(target) ? null : this.findAdjacentHarvestCover(target, woodTask);
+    }
+
+    private BlockPos findBlockingBlockOnLine(BlockPos target) {
+        BlockHitResult hitResult = this.level().clip(new ClipContext(this.getEyePosition(), Vec3.atCenterOf(target), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, this));
+        if (hitResult.getType() != HitResult.Type.BLOCK) {
+            return null;
+        }
+        BlockPos hitPos = hitResult.getBlockPos();
+        return hitPos.equals(target) ? null : hitPos;
+    }
+
+    private BlockPos findAdjacentHarvestCover(BlockPos target, boolean woodTask) {
+        BlockPos bestPos = null;
+        double bestDistance = Double.MAX_VALUE;
+
+        for (Direction direction : Direction.values()) {
+            BlockPos candidate = target.relative(direction);
+            BlockState candidateState = this.level().getBlockState(candidate);
+            if (!this.isBreakableHarvestObstacle(candidateState, woodTask)) {
+                continue;
+            }
+            if (!this.hasOpenFaceExcluding(candidate, target)) {
+                continue;
+            }
+
+            double distance = this.distanceToSqr(Vec3.atCenterOf(candidate));
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestPos = candidate;
+            }
+        }
+
+        return bestPos;
+    }
+
+    private boolean hasOpenFaceExcluding(BlockPos pos, BlockPos excludedNeighbor) {
+        for (Direction direction : Direction.values()) {
+            BlockPos adjacent = pos.relative(direction);
+            if (adjacent.equals(excludedNeighbor)) {
+                continue;
+            }
+            if (this.level().isEmptyBlock(adjacent)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isBreakableNavigationObstacle(BlockState state) {
+        return this.isBreakableMiningCover(state) || state.is(BlockTags.LEAVES);
+    }
+
+    private boolean isBreakableHarvestObstacle(BlockState state, boolean woodTask) {
+        if (state.isAir() || state.getDestroySpeed(this.level(), BlockPos.ZERO) < 0.0F) {
+            return false;
+        }
+        return woodTask ? state.is(BlockTags.LEAVES) : this.isBreakableMiningCover(state);
+    }
+
+    private boolean isBreakableMiningCover(BlockState state) {
+        return state.is(BlockTags.BASE_STONE_OVERWORLD)
+                || state.is(BlockTags.BASE_STONE_NETHER)
+                || state.is(BlockTags.LEAVES)
+                || state.is(Blocks.DIRT)
+                || state.is(Blocks.GRASS_BLOCK)
+                || state.is(Blocks.COARSE_DIRT)
+                || state.is(Blocks.ROOTED_DIRT)
+                || state.is(Blocks.GRAVEL)
+                || state.is(Blocks.SAND)
+                || state.is(Blocks.RED_SAND)
+                || state.is(Blocks.CLAY)
+                || state.is(Blocks.TUFF)
+                || state.is(Blocks.BLACKSTONE)
+                || state.is(Blocks.COBBLESTONE)
+                || state.is(Blocks.COBBLED_DEEPSLATE)
+                || state.is(Blocks.NETHERRACK);
+    }
+
+    private boolean breakAuxiliaryBlock(BlockPos pos, String observationPrefix) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        if (!serverLevel.getGameRules().get(GameRules.MOB_GRIEFING)) {
+            return false;
+        }
+
+        BlockState state = serverLevel.getBlockState(pos);
+        if (state.isAir() || state.getDestroySpeed(serverLevel, pos) < 0.0F) {
+            return false;
+        }
+
+        this.facePosition(Vec3.atCenterOf(pos));
+        BlockEntity blockEntity = serverLevel.getBlockEntity(pos);
+        ItemStack tool = this.getMainHandItem().copy();
+        List<ItemStack> drops = Block.getDrops(state, serverLevel, pos, blockEntity, this, tool);
+        serverLevel.levelEvent(2001, pos, Block.getId(state));
+        serverLevel.setBlock(pos, Blocks.AIR.defaultBlockState(), 3);
+
+        for (ItemStack stack : drops) {
+            ItemStack remainder = this.storeInBackpack(stack.copy());
+            if (!remainder.isEmpty()) {
+                this.spawnAtLocation(serverLevel, remainder);
+            }
+        }
+
+        this.lastObservation = observationPrefix + this.formatPos(pos);
+        this.remember("路径", this.lastObservation);
+        return true;
     }
 
     private boolean tryCraftBread() {
@@ -1037,7 +1311,10 @@ public class AIPlayerEntity extends Zombie {
         }
 
         BlockState state = this.level().getBlockState(pos);
-        return woodTask ? state.is(BlockTags.LOGS) : this.isInterestingOre(state) && this.isExposed(pos);
+        if (woodTask) {
+            return state.is(BlockTags.LOGS);
+        }
+        return this.isInterestingOre(state) && (this.isExposed(pos) || this.findAdjacentHarvestCover(pos, false) != null);
     }
 
     private BlockPos findNearestHarvestBlock(boolean woodTask) {
@@ -1051,7 +1328,9 @@ public class AIPlayerEntity extends Zombie {
                 for (int z = -SCAN_RADIUS; z <= SCAN_RADIUS; z++) {
                     cursor.set(origin.getX() + x, origin.getY() + y, origin.getZ() + z);
                     BlockState state = this.level().getBlockState(cursor);
-                    boolean matches = woodTask ? state.is(BlockTags.LOGS) : this.isInterestingOre(state) && this.isExposed(cursor);
+                    boolean matches = woodTask
+                            ? state.is(BlockTags.LOGS)
+                            : this.isInterestingOre(state) && (this.isExposed(cursor) || this.findAdjacentHarvestCover(cursor, false) != null);
                     if (!matches) {
                         continue;
                     }
@@ -1094,8 +1373,15 @@ public class AIPlayerEntity extends Zombie {
             candidates.add(target.relative(direction));
             candidates.add(target.relative(direction).below());
             candidates.add(target.relative(direction).below().below());
+            candidates.add(target.relative(direction, 2));
+            candidates.add(target.relative(direction, 2).below());
         }
         candidates.add(target.below());
+        candidates.add(target.below().below());
+        candidates.add(target.north().east());
+        candidates.add(target.north().west());
+        candidates.add(target.south().east());
+        candidates.add(target.south().west());
 
         return candidates.stream()
                 .filter(this::canStandAt)
@@ -1645,6 +1931,32 @@ public class AIPlayerEntity extends Zombie {
         }
 
         return String.join("、", preview);
+    }
+
+    public String getDetailedInventorySummary() {
+        List<String> entries = new ArrayList<>();
+        ItemStack mainHand = this.getMainHandItem();
+        ItemStack offHand = this.getOffhandItem();
+        if (!mainHand.isEmpty()) {
+            entries.add("主手=" + mainHand.getHoverName().getString() + "x" + mainHand.getCount());
+        }
+        if (!offHand.isEmpty()) {
+            entries.add("副手=" + offHand.getHoverName().getString() + "x" + offHand.getCount());
+        }
+
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        for (ItemStack stack : this.backpack) {
+            if (stack.isEmpty()) {
+                continue;
+            }
+            counts.merge(stack.getHoverName().getString(), stack.getCount(), Integer::sum);
+        }
+
+        for (Map.Entry<String, Integer> entry : counts.entrySet()) {
+            entries.add(entry.getKey() + "x" + entry.getValue());
+        }
+
+        return entries.isEmpty() ? "空" : String.join("、", entries);
     }
 
     private String formatPos(BlockPos pos) {

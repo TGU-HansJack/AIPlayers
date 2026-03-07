@@ -10,7 +10,8 @@ public enum AIPlayerAction {
     STAND("stand", "站起"),
     LOOK_UP("look_up", "抬头"),
     LOOK_DOWN("look_down", "低头"),
-    LOOK_OWNER("look_owner", "看向主人");
+    LOOK_OWNER("look_owner", "看向主人"),
+    RECOVER("recover", "脱困");
 
     private final String commandName;
     private final String displayName;

@@ -29,7 +29,7 @@ import net.minecraftforge.event.RegisterCommandsEvent;
 public final class AIPlayersCommands {
     private static final SimpleCommandExceptionType NOT_AN_AI_PLAYER = new SimpleCommandExceptionType(Component.literal("目标不是 AI Players 实体。"));
     private static final SimpleCommandExceptionType INVALID_MODE = new SimpleCommandExceptionType(Component.literal("未知模式。可用模式：idle, follow, guard, gather_wood, mine, explore, build_shelter, survive"));
-    private static final SimpleCommandExceptionType INVALID_ACTION = new SimpleCommandExceptionType(Component.literal("未知动作。可用动作：jump, crouch, stand, look_up, look_down, look_owner"));
+    private static final SimpleCommandExceptionType INVALID_ACTION = new SimpleCommandExceptionType(Component.literal("未知动作。可用动作：jump, crouch, stand, look_up, look_down, look_owner, recover"));
 
     private AIPlayersCommands() {
     }
@@ -53,6 +53,9 @@ public final class AIPlayersCommands {
                 .then(Commands.literal("status")
                         .then(Commands.argument("target", EntityArgument.entity())
                                 .executes(AIPlayersCommands::status)))
+                .then(Commands.literal("inventory")
+                        .then(Commands.argument("target", EntityArgument.entity())
+                                .executes(AIPlayersCommands::inventory)))
                 .then(Commands.literal("memory")
                         .then(Commands.argument("target", EntityArgument.entity())
                                 .executes(AIPlayersCommands::memory)))
@@ -136,6 +139,12 @@ public final class AIPlayersCommands {
     private static int status(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
         AIPlayerEntity companion = resolveCompanion(context, "target");
         context.getSource().sendSuccess(() -> Component.literal(companion.getStatusSummary()), false);
+        return 1;
+    }
+
+    private static int inventory(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        AIPlayerEntity companion = resolveCompanion(context, "target");
+        context.getSource().sendSuccess(() -> Component.literal("背包内容：" + companion.getDetailedInventorySummary()), false);
         return 1;
     }
 

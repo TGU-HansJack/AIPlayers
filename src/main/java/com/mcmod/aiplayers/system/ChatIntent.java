@@ -4,6 +4,7 @@ public enum ChatIntent {
     GREET,
     HELP,
     STATUS,
+    INVENTORY,
     MEMORY,
     PLAN,
     FOLLOW,
@@ -19,6 +20,7 @@ public enum ChatIntent {
     LOOK_UP,
     LOOK_DOWN,
     LOOK_OWNER,
+    RECOVER,
     STOP,
     UNKNOWN
 }

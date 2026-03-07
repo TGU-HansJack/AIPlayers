@@ -19,6 +19,9 @@ public final class ChatIntentParser {
         if (containsAny(normalized, "帮助", "help", "你会", "能做什么")) {
             return ChatIntent.HELP;
         }
+        if (containsAny(normalized, "背包", "包里", "物品", "库存", "inventory", "bag", "what do you have")) {
+            return ChatIntent.INVENTORY;
+        }
         if (containsAny(normalized, "记忆", "回忆", "memory", "recent memory")) {
             return ChatIntent.MEMORY;
         }
@@ -29,6 +32,9 @@ public final class ChatIntentParser {
             return ChatIntent.STATUS;
         }
         if (containsAny(normalized, "跟随", "跟着", "follow", "come with me")) {
+            return ChatIntent.FOLLOW;
+        }
+        if (containsAny(normalized, "快跟上", "跟紧", "过来", "回来", "come here")) {
             return ChatIntent.FOLLOW;
         }
         if (containsAny(normalized, "护卫", "保护", "guard", "protect")) {
@@ -66,6 +72,9 @@ public final class ChatIntentParser {
         }
         if (containsAny(normalized, "看我", "看向我", "look at me", "look owner")) {
             return ChatIntent.LOOK_OWNER;
+        }
+        if (containsAny(normalized, "脱困", "出来", "卡住了", "卡住", "unstuck", "recover")) {
+            return ChatIntent.RECOVER;
         }
         if (containsAny(normalized, "停止", "待命", "停下", "stop", "wait", "idle")) {
             return ChatIntent.STOP;
