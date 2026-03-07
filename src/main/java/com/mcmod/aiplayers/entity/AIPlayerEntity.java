@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Predicate;
@@ -303,6 +304,10 @@ public class AIPlayerEntity extends Zombie {
             return this.executeIntent(speaker, intent);
         }
 
+        if (!AIServiceManager.canUseExternalService()) {
+            return this.generateLocalConversationReply(speaker, content, false);
+        }
+
         if (AIServiceManager.canUseExternalService()) {
             if (this.pendingAiResponse) {
                 return "我还在思考上一条消息，请稍等。";
@@ -323,7 +328,7 @@ public class AIPlayerEntity extends Zombie {
 
                     String reply;
                     if (throwable != null || apiResponse == null) {
-                        reply = this.executeIntent(speaker, ChatIntent.UNKNOWN);
+                        reply = this.generateLocalConversationReply(speaker, content, true);
                     } else {
                         String directiveResult = this.applyApiDirective(speaker, apiResponse);
                         reply = apiResponse.reply() == null || apiResponse.reply().isBlank() ? directiveResult : apiResponse.reply();
@@ -338,7 +343,7 @@ public class AIPlayerEntity extends Zombie {
             return "收到，我先思考一下。";
         }
 
-        return this.executeIntent(speaker, ChatIntent.UNKNOWN);
+        return this.generateLocalConversationReply(speaker, content, false);
     }
     public String executeIntent(ServerPlayer speaker, ChatIntent intent) {
         if (!this.canReceiveOrdersFrom(speaker)) {
@@ -562,6 +567,79 @@ public class AIPlayerEntity extends Zombie {
         }
 
         return result;
+    }
+
+    private String generateLocalConversationReply(ServerPlayer speaker, String content, boolean apiFailed) {
+        String normalized = this.normalizeConversationText(content);
+        if (containsAnyToken(normalized, "谢谢", "辛苦了", "干得不错", "做得好", "thanks", "thank you", "good job")) {
+            return "不客气。我当前在" + this.safeModeDisplayName() + "，目标是“" + this.latestAgentGoal + "”。";
+        }
+        if (containsAnyToken(normalized, "你在做什么", "你现在在做什么", "你在干嘛", "在忙什么", "what are you doing")) {
+            return "我现在在" + this.safeModeDisplayName() + "，目标是“" + this.latestAgentGoal + "”，最近反馈是：“" + this.lastTaskFeedback + "”。";
+        }
+        if (containsAnyToken(normalized, "你看到了什么", "附近有什么", "周围有什么", "你发现了什么", "what do you see")) {
+            return "我目前观察到：" + this.getObservationSummary();
+        }
+        if (containsAnyToken(normalized, "你需要什么", "还缺什么", "缺什么", "需要帮忙吗", "what do you need")) {
+            return this.buildNeedSummary();
+        }
+        if (containsAnyToken(normalized, "接下来怎么办", "下一步怎么办", "你建议什么", "下一步做什么", "what next", "what should we do")) {
+            return "我的建议是：" + this.getPlanSummary();
+        }
+        if (containsAnyToken(normalized, "自由生存", "自己玩", "自己活动", "自己决定", "autonomous", "be autonomous")) {
+            this.assignOwner(speaker);
+            this.setMode(AIPlayerMode.SURVIVE);
+            return "好，我会切到自主生存模式，并根据环境、记忆和失败反馈持续调整。当前目标是“" + this.latestAgentGoal + "”。";
+        }
+        if (containsAnyToken(normalized, "聊聊天", "说句话", "和我说话", "聊一下", "talk to me", "say something")) {
+            return "我在。当前认知是：" + this.getCognitiveSummary() + "；最近任务反馈是：" + this.lastTaskFeedback;
+        }
+
+        String prefix = apiFailed ? "外部对话 AI 当前不可用，我先基于本地认知回答。" : "我先基于当前观察回答。";
+        return prefix
+                + " 当前目标是“" + this.latestAgentGoal + "”，最近反馈是“" + this.lastTaskFeedback + "”。"
+                + " 你也可以直接说：跟随、护卫、砍树、挖矿、探索、建造、生存、跳跃、下蹲、抬头、背包、把木头给我、脱困、记忆、状态、计划、停止。";
+    }
+
+    private String buildNeedSummary() {
+        List<String> needs = new ArrayList<>();
+        if (this.hasLowFoodSupply()) {
+            needs.add("食物偏少");
+        }
+        if (this.hasLowTools()) {
+            needs.add("基础工具不足");
+        }
+        if (this.safeMode() == AIPlayerMode.BUILD_SHELTER && this.countAvailableBuildingUnits() < 12) {
+            needs.add("建材不足");
+        }
+        if (this.getHealth() <= 8.0F) {
+            needs.add("血量较低");
+        }
+        if (needs.isEmpty()) {
+            return "我目前物资和状态还算稳定，重点是继续推进“" + this.latestAgentGoal + "”。";
+        }
+        return "我现在最缺的是：" + String.join("、", needs) + "。";
+    }
+
+    private String normalizeConversationText(String content) {
+        if (content == null) {
+            return "";
+        }
+        return content.toLowerCase(Locale.ROOT)
+                .replace('，', ' ')
+                .replace('。', ' ')
+                .replace('！', ' ')
+                .replace('？', ' ')
+                .replace('、', ' ')
+                .replace('：', ' ')
+                .replace(':', ' ')
+                .replace('；', ' ')
+                .replace(';', ' ')
+                .replace('·', ' ')
+                .replace('\n', ' ')
+                .replace('\r', ' ')
+                .replaceAll("\\s+", " ")
+                .trim();
     }
 
     private void runAgentPipeline() {
@@ -2605,8 +2683,23 @@ public class AIPlayerEntity extends Zombie {
             alert = "我发现了可采集矿石@" + this.formatPos(this.rememberedOre) + "。";
         } else if (this.rememberedCrop != null && this.hasLowFoodSupply()) {
             alert = "食物不多了，附近有可收割作物@" + this.formatPos(this.rememberedCrop) + "。";
+        } else if (this.tickCount % 240 == 0) {
+            alert = this.buildAutonomousCommentary();
         }
         this.sendOwnerAlert(alert, false);
+    }
+
+    private String buildAutonomousCommentary() {
+        if (this.taskFailureStreak >= 2 && this.lastTaskFeedback != null && !this.lastTaskFeedback.isBlank()) {
+            return "我在“" + this.activeTaskName + "”上遇到阻碍：" + this.lastTaskFeedback + "。我会换个办法继续。";
+        }
+        if (this.taskSuccessStreak > 0 && this.lastTaskFeedback != null && !this.lastTaskFeedback.isBlank() && this.tickCount - this.lastTaskFeedbackTick <= 200) {
+            return "我刚取得进展：" + this.lastTaskFeedback + "。";
+        }
+        if (this.latestAgentGoal != null && !this.latestAgentGoal.isBlank()) {
+            return "我当前的打算是：" + this.latestAgentGoal + "。";
+        }
+        return "我正在持续观察环境并准备下一步行动。";
     }
 
     private void sendOwnerAlert(String message, boolean force) {

@@ -27,6 +27,7 @@ import javax.sound.sampled.AudioInputStream;
 import javax.sound.sampled.AudioSystem;
 import javax.sound.sampled.Clip;
 import javax.sound.sampled.DataLine;
+import javax.sound.sampled.LineEvent;
 import javax.sound.sampled.LineUnavailableException;
 import javax.sound.sampled.TargetDataLine;
 import net.minecraft.client.Minecraft;
@@ -49,6 +50,7 @@ public final class AIPlayersVoiceClient {
     private static volatile TargetDataLine activeLine;
     private static volatile ByteArrayOutputStream activeBuffer;
     private static volatile Thread recorderThread;
+    private static volatile Clip activeClip;
 
     private AIPlayersVoiceClient() {
     }
@@ -465,7 +467,8 @@ public final class AIPlayersVoiceClient {
     }
 
     private static CompletableFuture<byte[]> downloadAudio(String url, int timeoutMs) {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+        String normalizedUrl = normalizeAudioUrl(url);
+        HttpRequest request = HttpRequest.newBuilder(URI.create(normalizedUrl))
                 .timeout(Duration.ofMillis(Math.max(2000, timeoutMs)))
                 .GET()
                 .build();
@@ -473,18 +476,48 @@ public final class AIPlayersVoiceClient {
                 .sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
                 .handle((response, throwable) -> {
                     if (throwable != null || response == null || response.statusCode() < 200 || response.statusCode() >= 300) {
+                        lastStatus = throwable != null ? "TTS 下载失败" : "TTS 下载 HTTP " + (response == null ? "null" : response.statusCode());
                         return null;
                     }
                     return response.body();
                 });
     }
 
+    private static String normalizeAudioUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return url;
+        }
+        if (url.startsWith("http://dashscope-result")) {
+            return "https://" + url.substring("http://".length());
+        }
+        return url;
+    }
+
     private static void playWav(byte[] audioBytes) {
         try (AudioInputStream audio = AudioSystem.getAudioInputStream(new ByteArrayInputStream(audioBytes))) {
+            Clip previous = activeClip;
+            if (previous != null) {
+                try {
+                    previous.stop();
+                    previous.close();
+                } catch (RuntimeException ignored) {
+                }
+            }
             Clip clip = AudioSystem.getClip();
+            clip.addLineListener(event -> {
+                if (event.getType() == LineEvent.Type.STOP) {
+                    if (activeClip == clip) {
+                        activeClip = null;
+                    }
+                    clip.close();
+                }
+            });
             clip.open(audio);
+            activeClip = clip;
+            lastStatus = "语音播报中";
             clip.start();
         } catch (Exception ex) {
+            lastStatus = "语音播放失败";
             AIPlayersMod.LOGGER.warn("Unable to play synthesized voice", ex);
         }
     }
