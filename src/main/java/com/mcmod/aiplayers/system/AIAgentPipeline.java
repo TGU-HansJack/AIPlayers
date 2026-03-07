@@ -202,16 +202,16 @@ public final class AIAgentPipeline {
                     reasoning = "矿点存在且背包还有空间，可以扩充资源储备";
                 } else if (state.progressStalled()) {
                     goal = state.ownerAvailable() ? "生存循环停滞，先回到主人附近获取上下文" : "生存循环停滞，先探索附近刷新环境认知";
-                    recommendedMode = state.ownerAvailable() ? AIPlayerMode.FOLLOW : AIPlayerMode.EXPLORE;
+                    recommendedMode = AIPlayerMode.SURVIVE;
                     steps.add(state.ownerAvailable() ? "回到主人附近" : "探索新的可达位置");
                     steps.add("刷新周边资源与威胁感知");
                     reasoning = "当前生存流程缺少进展，需要先更新环境上下文";
                 } else {
-                    goal = state.ownerAvailable() ? "围绕主人巡查与待命" : "探索并寻找新资源";
-                    recommendedMode = state.ownerAvailable() ? AIPlayerMode.GUARD : AIPlayerMode.EXPLORE;
-                    steps.add(state.ownerAvailable() ? "靠近主人" : "探索附近区域");
+                    goal = state.ownerAvailable() ? "继续自主生存，并兼顾主人附近安全" : "继续自主生存并寻找新资源";
+                    recommendedMode = AIPlayerMode.SURVIVE;
+                    steps.add(state.ownerAvailable() ? "保持在主人附近活动" : "探索附近区域");
                     steps.add("持续环境感知");
-                    reasoning = "当前没有更高优先级任务，进入稳态巡查循环";
+                    reasoning = "当前没有更高优先级任务，继续自主生存闭环而不是退回守护待命";
                 }
                 return localPlan(goal, recommendedMode, steps, reasoning, state, memory);
             }

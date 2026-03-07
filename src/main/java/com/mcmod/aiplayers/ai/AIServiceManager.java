@@ -79,6 +79,10 @@ public final class AIServiceManager {
                 + "；状态：" + lastStatus;
     }
 
+    public static String getLastStatusText() {
+        return lastStatus;
+    }
+
     public static CompletableFuture<AITaskPlanResponse> tryPlanTaskAsync(AIPlayerEntity companion, AIAgentPlan localPlan) {
         if (!canUseTaskPlanningService()) {
             return CompletableFuture.completedFuture(null);

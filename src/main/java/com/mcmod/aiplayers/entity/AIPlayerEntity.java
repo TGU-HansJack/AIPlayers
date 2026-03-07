@@ -152,6 +152,9 @@ public class AIPlayerEntity extends Zombie {
     private int lastMeaningfulProgressTick;
     private int lastTaskFeedbackTick;
     private boolean lastTaskFeedbackWasFailure;
+    private boolean playerModePinned;
+    private AIPlayerMode playerPinnedMode;
+    private String lastTaskAiServiceStatus = "待机";
 
     public AIPlayerEntity(EntityType<? extends Zombie> entityType, Level level) {
         super(entityType, level);
@@ -290,6 +293,28 @@ public class AIPlayerEntity extends Zombie {
         this.markPersistentDirty();
     }
 
+    private void applyPlayerDirectedMode(ServerPlayer speaker, AIPlayerMode newMode) {
+        this.assignOwner(speaker);
+        this.playerModePinned = true;
+        this.playerPinnedMode = newMode;
+        this.clearTaskAiPlanState();
+        this.setMode(newMode);
+    }
+
+    private void clearPlayerModePin() {
+        this.playerModePinned = false;
+        this.playerPinnedMode = null;
+    }
+
+    private void clearTaskAiPlanState() {
+        this.pendingTaskAiPlan = false;
+        this.taskAiPlanValidUntilTick = 0;
+        this.taskAiGoal = "";
+        this.taskAiMode = null;
+        this.taskAiSubtasks.clear();
+        this.taskAiFallback = "";
+    }
+
     public String executeConversation(ServerPlayer speaker, String content) {
         if (!this.canReceiveOrdersFrom(speaker)) {
             return "我现在只接受绑定玩家的命令。";
@@ -373,38 +398,31 @@ public class AIPlayerEntity extends Zombie {
                 return "当前规划：" + this.getPlanSummary();
             }
             case FOLLOW -> {
-                this.assignOwner(speaker);
-                this.setMode(AIPlayerMode.FOLLOW);
+                this.applyPlayerDirectedMode(speaker, AIPlayerMode.FOLLOW);
                 return "收到，我开始跟随你。";
             }
             case GUARD -> {
-                this.assignOwner(speaker);
-                this.setMode(AIPlayerMode.GUARD);
+                this.applyPlayerDirectedMode(speaker, AIPlayerMode.GUARD);
                 return "收到，我会优先保护你。";
             }
             case GATHER_WOOD -> {
-                this.assignOwner(speaker);
-                this.setMode(AIPlayerMode.GATHER_WOOD);
+                this.applyPlayerDirectedMode(speaker, AIPlayerMode.GATHER_WOOD);
                 return "开始砍树，我会处理上方原木和附近木头。";
             }
             case MINE -> {
-                this.assignOwner(speaker);
-                this.setMode(AIPlayerMode.MINE);
+                this.applyPlayerDirectedMode(speaker, AIPlayerMode.MINE);
                 return "开始挖矿，我会寻找附近矿石，并尝试处理浅层遮挡方块。";
             }
             case EXPLORE -> {
-                this.assignOwner(speaker);
-                this.setMode(AIPlayerMode.EXPLORE);
+                this.applyPlayerDirectedMode(speaker, AIPlayerMode.EXPLORE);
                 return "开始探索，我会在附近巡查并记录位置。";
             }
             case BUILD -> {
-                this.assignOwner(speaker);
-                this.setMode(AIPlayerMode.BUILD_SHELTER);
+                this.applyPlayerDirectedMode(speaker, AIPlayerMode.BUILD_SHELTER);
                 return "开始建造简易避难所，我会先补足建材。";
             }
             case SURVIVE -> {
-                this.assignOwner(speaker);
-                this.setMode(AIPlayerMode.SURVIVE);
+                this.applyPlayerDirectedMode(speaker, AIPlayerMode.SURVIVE);
                 return "进入自主生存模式，我会战斗、采集、恢复并在夜晚尝试建造避难所。";
             }
             case JUMP -> {
@@ -429,6 +447,8 @@ public class AIPlayerEntity extends Zombie {
                 return this.performAction(AIPlayerAction.RECOVER);
             }
             case STOP -> {
+                this.clearPlayerModePin();
+                this.clearTaskAiPlanState();
                 this.setMode(AIPlayerMode.IDLE);
                 return "已停止当前任务，进入待命。";
             }
@@ -553,8 +573,7 @@ public class AIPlayerEntity extends Zombie {
         if (response.mode() != null && !response.mode().isBlank() && !"unchanged".equalsIgnoreCase(response.mode())) {
             AIPlayerMode apiMode = AIPlayerMode.fromCommand(response.mode());
             if (apiMode != null) {
-                this.assignOwner(speaker);
-                this.setMode(apiMode);
+                this.applyPlayerDirectedMode(speaker, apiMode);
                 result = "我已切换到" + apiMode.displayName() + "模式。";
             }
         }
@@ -689,9 +708,13 @@ public class AIPlayerEntity extends Zombie {
             server.execute(() -> {
                 this.pendingTaskAiPlan = false;
                 if (throwable != null || response == null || !response.hasPlan()) {
-                    this.reportTaskFailure(this.activeTaskName, "任务 AI 未返回有效规划，回退本地计划");
+                    this.lastTaskAiServiceStatus = AIServiceManager.getLastStatusText();
+                    this.clearTaskAiPlanState();
+                    this.nextTaskAiPlanTick = this.tickCount + AIServiceManager.getTaskAiIntervalTicks() * 4;
+                    this.remember("任务AI", "任务规划暂不可用，继续使用本地计划：" + this.lastTaskAiServiceStatus);
                     return;
                 }
+                this.lastTaskAiServiceStatus = "最近一次任务规划成功";
                 this.taskAiGoal = response.goal();
                 this.taskAiMode = response.resolveMode(this.safeMode());
                 this.taskAiSubtasks = response.subtasks() == null ? new ArrayList<>() : new ArrayList<>(response.subtasks());
@@ -762,6 +785,9 @@ public class AIPlayerEntity extends Zombie {
 
     private boolean shouldAdoptPipelineMode(AIPlayerMode recommendedMode) {
         if (recommendedMode == this.safeMode()) {
+            return false;
+        }
+        if (this.playerModePinned && this.playerPinnedMode == this.safeMode()) {
             return false;
         }
         return switch (this.safeMode()) {
@@ -1164,6 +1190,13 @@ public class AIPlayerEntity extends Zombie {
             } else {
                 this.rememberedOre = target;
             }
+        }
+
+        target = this.normalizeHarvestTarget(target, woodTask);
+        if (woodTask) {
+            this.rememberedLog = target;
+        } else {
+            this.rememberedOre = target;
         }
 
         if (target == null) {
@@ -2794,6 +2827,40 @@ public class AIPlayerEntity extends Zombie {
             return state.is(BlockTags.LOGS);
         }
         return this.isInterestingOre(state) && (this.isExposed(pos) || this.findAdjacentHarvestCover(pos, false) != null);
+    }
+
+    private BlockPos normalizeHarvestTarget(BlockPos pos, boolean woodTask) {
+        if (!woodTask || pos == null) {
+            return pos;
+        }
+
+        BlockPos current = pos;
+        while (this.level().getBlockState(current.below()).is(BlockTags.LOGS)) {
+            current = current.below();
+        }
+
+        BlockPos best = current;
+        double bestScore = this.distanceToSqr(Vec3.atCenterOf(current));
+        for (int x = -1; x <= 1; x++) {
+            for (int y = 0; y <= 2; y++) {
+                for (int z = -1; z <= 1; z++) {
+                    BlockPos candidate = current.offset(x, y, z);
+                    if (!this.level().getBlockState(candidate).is(BlockTags.LOGS)) {
+                        continue;
+                    }
+
+                    double score = this.distanceToSqr(Vec3.atCenterOf(candidate));
+                    if (candidate.getY() == current.getY()) {
+                        score -= 0.5D;
+                    }
+                    if (score < bestScore) {
+                        bestScore = score;
+                        best = candidate;
+                    }
+                }
+            }
+        }
+        return best;
     }
 
     private BlockPos findNearestHarvestBlock(boolean woodTask) {
