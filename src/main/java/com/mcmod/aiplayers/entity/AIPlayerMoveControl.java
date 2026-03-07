@@ -8,14 +8,23 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
 final class AIPlayerMoveControl extends MoveControl {
-    private static final float MAX_TURN_DEGREES = 14.0F;
+    private static final float MAX_TURN_DEGREES = 18.0F;
+    private static final float BRAKE_TURN_DEGREES = 78.0F;
     private static final float NEAR_TARGET_SLOWDOWN = 0.72F;
-    private static final float MIN_FORWARD_INPUT = 0.3F;
+    private static final float VERY_NEAR_TARGET_SLOWDOWN = 0.48F;
+    private static final float MIN_FORWARD_INPUT = 0.18F;
+    private static final float MAX_STRAFE_INPUT = 0.82F;
+    private static final float FORWARD_LERP = 0.38F;
+    private static final float STRAFE_LERP = 0.30F;
+    private static final float SPEED_LERP = 0.26F;
     private static final double JUMP_HORIZONTAL_DISTANCE = 1.45D;
     private static final double FRONT_PROBE_DISTANCE = 0.75D;
     private static final double WATER_ASCENT_SPEED = 0.08D;
 
     private final AIPlayerEntity companion;
+    private float smoothedForward;
+    private float smoothedStrafe;
+    private float smoothedSpeed;
 
     AIPlayerMoveControl(AIPlayerEntity companion) {
         super(companion);
@@ -28,7 +37,11 @@ final class AIPlayerMoveControl extends MoveControl {
         this.companion.setZza(0.0F);
 
         if (this.operation != Operation.MOVE_TO) {
-            this.companion.setSpeed(0.0F);
+            this.smoothedForward = Mth.lerp(0.35F, this.smoothedForward, 0.0F);
+            this.smoothedStrafe = Mth.lerp(0.35F, this.smoothedStrafe, 0.0F);
+            this.smoothedSpeed = Mth.lerp(0.4F, this.smoothedSpeed, 0.0F);
+            this.companion.setSpeed(this.smoothedSpeed);
+            this.companion.setSprinting(false);
             return;
         }
 
@@ -39,7 +52,11 @@ final class AIPlayerMoveControl extends MoveControl {
         double horizontalDistanceSqr = dx * dx + dz * dz;
         double distanceSqr = horizontalDistanceSqr + dy * dy;
         if (distanceSqr < 2.5E-3D) {
+            this.smoothedForward = 0.0F;
+            this.smoothedStrafe = 0.0F;
+            this.smoothedSpeed = 0.0F;
             this.companion.setSpeed(0.0F);
+            this.companion.setSprinting(false);
             return;
         }
 
@@ -49,21 +66,42 @@ final class AIPlayerMoveControl extends MoveControl {
         this.companion.setYRot(nextYaw);
         this.companion.setYHeadRot(nextYaw);
         this.companion.setYBodyRot(nextYaw);
+        this.companion.getLookControl().setLookAt(this.wantedX, this.wantedY + 0.6D, this.wantedZ, 30.0F, 30.0F);
 
         double attributeSpeed = this.companion.getAttributeValue(Attributes.MOVEMENT_SPEED);
         float baseSpeed = (float) Math.max(MIN_SPEED, this.speedModifier * attributeSpeed);
         float yawDelta = Mth.wrapDegrees(targetYaw - nextYaw);
         float absYawDelta = Math.abs(yawDelta);
-        float turnFactor = Mth.clamp(1.0F - absYawDelta / 105.0F, 0.28F, 1.0F);
-        float moveSpeed = baseSpeed * turnFactor;
+        float turnFactor = Mth.clamp(1.0F - absYawDelta / 110.0F, 0.22F, 1.0F);
+        float targetSpeed = baseSpeed * turnFactor;
         if (horizontalDistanceSqr < 1.25D) {
-            moveSpeed *= NEAR_TARGET_SLOWDOWN;
+            targetSpeed *= NEAR_TARGET_SLOWDOWN;
+        }
+        if (horizontalDistanceSqr < 0.45D) {
+            targetSpeed *= VERY_NEAR_TARGET_SLOWDOWN;
+        }
+        if (absYawDelta > BRAKE_TURN_DEGREES) {
+            targetSpeed *= 0.58F;
         }
 
-        this.companion.setSpeed(moveSpeed);
-        this.companion.setZza(Mth.clamp(turnFactor + 0.08F, MIN_FORWARD_INPUT, 1.0F));
+        float radians = yawDelta * ((float) Math.PI / 180.0F);
+        float targetForward = Mth.clamp(Mth.cos(radians), MIN_FORWARD_INPUT, 1.0F);
+        float targetStrafe = Mth.clamp(-Mth.sin(radians), -MAX_STRAFE_INPUT, MAX_STRAFE_INPUT);
+        if (absYawDelta > BRAKE_TURN_DEGREES) {
+            targetForward *= 0.45F;
+            targetStrafe *= 0.55F;
+        }
 
+        this.smoothedSpeed = Mth.lerp(SPEED_LERP, this.smoothedSpeed, targetSpeed);
+        this.smoothedForward = Mth.lerp(FORWARD_LERP, this.smoothedForward, targetForward);
+        this.smoothedStrafe = Mth.lerp(STRAFE_LERP, this.smoothedStrafe, targetStrafe);
+
+        this.companion.setSpeed(this.smoothedSpeed);
+        this.companion.setZza(this.smoothedForward);
+        this.companion.setXxa(this.smoothedStrafe);
         double horizontalDistance = Math.sqrt(horizontalDistanceSqr);
+        this.companion.setSprinting(this.speedModifier > 1.12D && absYawDelta < 34.0F && horizontalDistance > 3.0D);
+
         if (shouldJump(dx, dy, dz, horizontalDistance)) {
             this.companion.getJumpControl().jump();
         }

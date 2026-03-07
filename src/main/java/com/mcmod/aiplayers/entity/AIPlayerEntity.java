@@ -24,6 +24,7 @@ import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.util.Mth;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.NonNullList;
@@ -53,6 +54,7 @@ import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.entity.monster.zombie.Zombie;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -1007,6 +1009,10 @@ public class AIPlayerEntity extends Zombie {
         double goalDistanceSqr = this.distanceToSqr(Vec3.atCenterOf(this.activeNavigationTarget));
         if (goalDistanceSqr <= 4.0D) {
             this.resetNavigationState();
+            return;
+        }
+        if (this.agentRuntime.movementController().isRecovering()) {
+            this.lastNavigationSample = this.position();
             return;
         }
         if (this.tickCount % SCAN_INTERVAL != 0) {
@@ -2335,6 +2341,7 @@ public class AIPlayerEntity extends Zombie {
         }
 
         this.facePosition(Vec3.atCenterOf(pos));
+        this.swing(InteractionHand.MAIN_HAND);
         BlockEntity blockEntity = serverLevel.getBlockEntity(pos);
         ItemStack tool = this.getMainHandItem().copy();
         List<ItemStack> drops = Block.getDrops(state, serverLevel, pos, blockEntity, this, tool);
@@ -2797,10 +2804,22 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private boolean canStandAt(BlockPos pos) {
+        if (pos == null) {
+            return false;
+        }
         BlockState feet = this.level().getBlockState(pos);
         BlockState head = this.level().getBlockState(pos.above());
         BlockState floor = this.level().getBlockState(pos.below());
-        return feet.isAir() && head.isAir() && !floor.isAir();
+        boolean feetClear = feet.getCollisionShape(this.level(), pos).isEmpty()
+                && !this.level().getFluidState(pos).is(FluidTags.WATER)
+                && !this.level().getFluidState(pos).is(FluidTags.LAVA);
+        boolean headClear = head.getCollisionShape(this.level(), pos.above()).isEmpty()
+                && !this.level().getFluidState(pos.above()).is(FluidTags.WATER)
+                && !this.level().getFluidState(pos.above()).is(FluidTags.LAVA);
+        boolean floorStable = !floor.getCollisionShape(this.level(), pos.below()).isEmpty()
+                && !floor.is(BlockTags.LEAVES)
+                && !this.level().getFluidState(pos.below()).is(FluidTags.LAVA);
+        return feetClear && headClear && floorStable;
     }
 
     private BlockPos findWalkablePositionNear(BlockPos center, int horizontalRadius, int verticalRadius) {
@@ -2862,6 +2881,7 @@ public class AIPlayerEntity extends Zombie {
         }
 
         this.facePosition(Vec3.atCenterOf(pos));
+        this.swing(InteractionHand.MAIN_HAND);
         BlockEntity blockEntity = serverLevel.getBlockEntity(pos);
         ItemStack tool = this.getMainHandItem().copy();
         List<ItemStack> drops = Block.getDrops(state, serverLevel, pos, blockEntity, this, tool);
@@ -2900,6 +2920,7 @@ public class AIPlayerEntity extends Zombie {
             return false;
         }
 
+        this.swing(InteractionHand.MAIN_HAND);
         serverLevel.setBlock(pos, Blocks.OAK_PLANKS.defaultBlockState(), 3);
         WorldScanner.invalidateAt(serverLevel, pos);
         TeamKnowledge.reportStructure(this, this.activeBlueprintId, pos);
@@ -3827,6 +3848,135 @@ public class AIPlayerEntity extends Zombie {
         this.remember(type, detail);
     }
 
+    boolean runtimeIsWithin(BlockPos pos, double maxDistanceSqr) {
+        return pos != null && this.distanceToSqr(Vec3.atCenterOf(pos)) <= maxDistanceSqr;
+    }
+
+    boolean runtimeNavigateToPosition(BlockPos pos, double speed) {
+        return this.navigateToPosition(pos, speed);
+    }
+
+    void runtimeLookAt(Vec3 target, int ticks) {
+        this.setForcedLookTarget(target, ticks);
+    }
+
+    BlockPos runtimeFindApproachPosition(BlockPos target) {
+        return this.findApproachPosition(target);
+    }
+
+    BlockPos runtimeResolveHarvestTarget(boolean woodTask) {
+        BlockPos target = woodTask ? this.rememberedLog : this.rememberedOre;
+        if (!this.isValidHarvestTarget(target, woodTask)) {
+            target = this.findNearestHarvestBlock(woodTask);
+            if (woodTask) {
+                this.rememberedLog = target;
+            } else {
+                this.rememberedOre = target;
+            }
+        }
+        target = this.normalizeHarvestTarget(target, woodTask);
+        if (woodTask) {
+            this.rememberedLog = target;
+        } else {
+            this.rememberedOre = target;
+        }
+        return target;
+    }
+
+    BlockPos runtimeFindHarvestObstacle(BlockPos target, boolean woodTask) {
+        return this.findHarvestObstacle(target, woodTask);
+    }
+
+    boolean runtimeCanHarvestFromHere(BlockPos target) {
+        return this.canHarvestFromHere(target);
+    }
+
+    boolean runtimeIsValidHarvestTarget(BlockPos pos, boolean woodTask) {
+        return this.isValidHarvestTarget(pos, woodTask);
+    }
+
+    boolean runtimeHasBreakablePathBlock(BlockPos pos, boolean woodTask) {
+        if (pos == null) {
+            return false;
+        }
+        BlockState state = this.level().getBlockState(pos);
+        if (state.isAir()) {
+            return false;
+        }
+        return woodTask ? this.isBreakableHarvestObstacle(state, true) : this.isBreakableNavigationObstacle(state) || this.isBreakableHarvestObstacle(state, false);
+    }
+
+    boolean runtimeBreakPathBlock(BlockPos pos, boolean woodTask) {
+        return this.breakAuxiliaryBlock(pos, woodTask ? "已清理树叶@" : "已清理路径障碍@");
+    }
+
+    boolean runtimeHarvestTarget(BlockPos pos, boolean woodTask) {
+        boolean harvested = this.harvestBlock(pos, woodTask);
+        if (!harvested) {
+            return false;
+        }
+        BlockPos nextTarget = this.findConnectedHarvestTarget(pos, woodTask);
+        if (woodTask) {
+            this.rememberedLog = nextTarget;
+        } else {
+            this.rememberedOre = nextTarget;
+        }
+        this.scanSurroundings();
+        return true;
+    }
+
+    boolean runtimeHasNearbyDrops() {
+        return this.observedDrop != null && this.observedDrop.isAlive();
+    }
+
+    boolean runtimeCollectNearbyDrops() {
+        return this.autoCollectNearbyDrops();
+    }
+
+    boolean runtimeCraftBasicTools() {
+        return this.tryCraftStoneTool(Items.STONE_AXE, "石斧") | this.tryCraftStoneTool(Items.STONE_PICKAXE, "石镐");
+    }
+
+    boolean runtimeHasLowTools() {
+        return this.hasLowTools();
+    }
+
+    boolean runtimeHasLowFoodSupply() {
+        return this.hasLowFoodSupply();
+    }
+
+    boolean runtimeCraftBread() {
+        return this.tryCraftBread();
+    }
+
+    boolean runtimeEnsurePlanksSupply() {
+        return this.ensurePlanksAvailable();
+    }
+
+    BlockPos runtimeFindNavigationObstacle(BlockPos target) {
+        return this.findNavigationObstacle(target);
+    }
+
+    boolean runtimeHasBuildingMaterials() {
+        return this.countAvailableBuildingUnits() >= BlueprintRegistry.get(this.activeBlueprintId).requiredUnits();
+    }
+
+    boolean runtimeHasPlankSupply() {
+        return this.countBackpackItem(Items.OAK_PLANKS) > 0;
+    }
+
+    BlockPos runtimeFindNextShelterPlacement() {
+        return this.findNextShelterPlacement();
+    }
+
+    boolean runtimeCanPlaceShelterBlockAt(BlockPos pos) {
+        return pos != null && this.level().getBlockState(pos).isAir();
+    }
+
+    boolean runtimePlaceShelterBlock(BlockPos pos) {
+        return this.placeShelterBlock(pos);
+    }
+
     void runtimeApplyCoarseMode(AIPlayerMode mode, boolean pin) {
         if (pin) {
             this.playerModePinned = true;
@@ -3861,6 +4011,60 @@ public class AIPlayerEntity extends Zombie {
         return walkable != null ? walkable : pos;
     }
 
+    boolean runtimeCanStandAt(BlockPos pos) {
+        return this.canStandAt(pos);
+    }
+
+    BlockPos runtimeFindNearbyDryStandPosition(BlockPos center, int horizontalRadius, int verticalRadius) {
+        return this.findNearbyDryStandPosition(center, horizontalRadius, verticalRadius);
+    }
+
+    boolean runtimeCanDirectlyTraverse(Vec3 from, Vec3 to) {
+        if (from == null || to == null) {
+            return false;
+        }
+        double distance = from.distanceTo(to);
+        if (distance <= 0.85D) {
+            return true;
+        }
+        int samples = Mth.clamp((int)Math.ceil(distance / 0.6D), 1, 32);
+        AABB baseBox = this.getBoundingBox().inflate(-0.1D, 0.0D, -0.1D);
+        boolean allowLiquid = this.isInWater() || this.isUnderWater() || this.isInLava();
+        for (int i = 1; i <= samples; i++) {
+            Vec3 sample = from.lerp(to, i / (double)samples);
+            AABB probe = baseBox.move(sample.x - this.getX(), sample.y - this.getY(), sample.z - this.getZ());
+            if (!this.level().noCollision(this, probe)) {
+                return false;
+            }
+            BlockPos feet = BlockPos.containing(sample.x, sample.y + 0.05D, sample.z);
+            if (allowLiquid) {
+                if (this.level().getFluidState(feet).is(FluidTags.LAVA) || this.level().getFluidState(feet.above()).is(FluidTags.LAVA)) {
+                    return false;
+                }
+                continue;
+            }
+            BlockState feetState = this.level().getBlockState(feet);
+            BlockState headState = this.level().getBlockState(feet.above());
+            BlockState floorState = this.level().getBlockState(feet.below());
+            if (!feetState.getCollisionShape(this.level(), feet).isEmpty() || !headState.getCollisionShape(this.level(), feet.above()).isEmpty()) {
+                return false;
+            }
+            if (this.level().getFluidState(feet).is(FluidTags.WATER) || this.level().getFluidState(feet.above()).is(FluidTags.WATER)) {
+                return false;
+            }
+            if (this.level().getFluidState(feet).is(FluidTags.LAVA) || this.level().getFluidState(feet.above()).is(FluidTags.LAVA)) {
+                return false;
+            }
+            if (!floorState.getCollisionShape(this.level(), feet.below()).isEmpty()) {
+                continue;
+            }
+            if (i < samples) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     BlockPos resolveRuntimeTarget(String key, BlockPos fallback) {
         return switch (key) {
             case "owner" -> {
@@ -3885,6 +4089,10 @@ public class AIPlayerEntity extends Zombie {
     }
 
     ActionExecutionResult executePlannedAction(PlannedAction action, AgentGoal goal) {
+        InteractionPlan interactionPlan = InteractionPlanner.forPlannedAction(this, action, goal);
+        if (interactionPlan != null) {
+            return InteractionExecutor.execute(this, interactionPlan);
+        }
         switch (action.type()) {
             case MOVE_TO_TARGET -> {
                 BlockPos target = this.resolveRuntimeTarget(action.targetKey(), action.fallbackTarget());
@@ -3895,18 +4103,6 @@ public class AIPlayerEntity extends Zombie {
                 this.navigateToPosition(target, action.speed());
                 return this.distanceToSqr(Vec3.atCenterOf(target)) <= 4.0D ? ActionExecutionResult.SUCCESS : ActionExecutionResult.RUNNING;
             }
-            case ACQUIRE_TOOL -> {
-                boolean crafted = this.tryCraftStoneTool(Items.STONE_AXE, "石斧") | this.tryCraftStoneTool(Items.STONE_PICKAXE, "石镐");
-                return crafted || !this.hasLowTools() ? ActionExecutionResult.SUCCESS : ActionExecutionResult.RUNNING;
-            }
-            case CHOP_TREE -> {
-                this.performHarvestTask(true);
-                return ActionExecutionResult.RUNNING;
-            }
-            case MINE_ORE -> {
-                this.performHarvestTask(false);
-                return ActionExecutionResult.RUNNING;
-            }
             case COLLECT_DROP -> {
                 return this.autoCollectNearbyDrops() ? ActionExecutionResult.SUCCESS : ActionExecutionResult.RUNNING;
             }
@@ -3916,18 +4112,8 @@ public class AIPlayerEntity extends Zombie {
                 }
                 return this.rememberedCrop == null ? ActionExecutionResult.FAILED : ActionExecutionResult.RUNNING;
             }
-            case CRAFT_PLANKS -> {
-                return this.ensurePlanksAvailable() ? ActionExecutionResult.SUCCESS : ActionExecutionResult.RUNNING;
-            }
-            case CRAFT_BREAD -> {
-                return this.tryCraftBread() || !this.hasLowFoodSupply() ? ActionExecutionResult.SUCCESS : ActionExecutionResult.RUNNING;
-            }
             case CRAFT_TORCH -> {
                 return this.tryCraftTorchBundle() ? ActionExecutionResult.SUCCESS : ActionExecutionResult.RUNNING;
-            }
-            case BUILD_SHELTER -> {
-                this.performBuildShelter();
-                return ActionExecutionResult.RUNNING;
             }
             case DELIVER_ITEM -> {
                 return this.performPendingDeliveryTask() ? ActionExecutionResult.RUNNING : ActionExecutionResult.SUCCESS;
@@ -3946,8 +4132,10 @@ public class AIPlayerEntity extends Zombie {
                 this.reportTaskProgress(this.activeTaskName, "观察更新：" + this.getObservationSummary());
                 return ActionExecutionResult.SUCCESS;
             }
+            default -> {
+                return ActionExecutionResult.RUNNING;
+            }
         }
-        return ActionExecutionResult.RUNNING;
     }
 
     private record DeliveryRequest(String label, boolean deliverAll, int requestedCount, Predicate<ItemStack> matcher) {
