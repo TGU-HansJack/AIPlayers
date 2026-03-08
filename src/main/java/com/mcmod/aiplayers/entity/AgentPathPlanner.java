@@ -9,12 +9,10 @@ import com.mcmod.aiplayers.vendor.baritone.pathing.path.Path;
 import java.util.ArrayList;
 import java.util.List;
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.phys.Vec3;
 
 public final class AgentPathPlanner {
-    private static final long PRIMARY_TIMEOUT_MS = 30L;
-    private static final long FAILURE_TIMEOUT_MS = 60L;
-
     private AgentPathPlanner() {
     }
 
@@ -29,13 +27,25 @@ public final class AgentPathPlanner {
     }
 
     public static Path plan(AIPlayerEntity entity, PathGoal goal) {
-        if (entity == null || goal == null) {
+        if (entity == null || goal == null || !(entity.level() instanceof ServerLevel serverLevel)) {
             return null;
         }
         BaritoneEntityContextAdapter contextAdapter = new BaritoneEntityContextAdapter(entity);
-        CalculationContext calculationContext = new CalculationContext(contextAdapter);
-        AStarPathFinder pathFinder = new AStarPathFinder(contextAdapter.playerFeet(), goal, calculationContext);
-        PathCalculationResult result = pathFinder.calculate(PRIMARY_TIMEOUT_MS, FAILURE_TIMEOUT_MS);
+        BlockPos start = contextAdapter.playerFeet();
+        BlockPos target = BaritoneGoalAdapter.estimateTargetPos(goal, start);
+        ChunkSnapshotCache.RegionSnapshot snapshot = ChunkSnapshotCache.capture(serverLevel, start, target);
+        if (target != null) {
+            Path cached = PathReuseCache.get(contextAdapter.dimensionId(), start, target, snapshot.signature(), contextAdapter.gameTime());
+            if (cached != null) {
+                return cached;
+            }
+        }
+        CalculationContext calculationContext = new CalculationContext(contextAdapter, snapshot, 4096);
+        AStarPathFinder pathFinder = new AStarPathFinder(start, goal, calculationContext, calculationContext.searchNodeLimit());
+        PathCalculationResult result = pathFinder.calculate(calculationContext.primaryTimeoutMs(), calculationContext.failureTimeoutMs());
+        if (result.path() != null && target != null) {
+            PathReuseCache.put(contextAdapter.dimensionId(), start, target, snapshot.signature(), contextAdapter.gameTime(), result.path());
+        }
         return result.path();
     }
 

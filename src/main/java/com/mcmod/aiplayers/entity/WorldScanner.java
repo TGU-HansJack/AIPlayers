@@ -77,6 +77,8 @@ public final class WorldScanner {
         ChunkPos chunkPos = new ChunkPos(pos);
         CACHE.keySet().removeIf(key -> key.dimension.equals(dimension) && key.chunkX == chunkPos.x && key.chunkZ == chunkPos.z);
         PathCache.invalidateAt(level, pos);
+        PathReuseCache.invalidateAt(level, pos);
+        ChunkSnapshotCache.invalidateAt(level, pos);
     }
 
     private static Set<ChunkPos> collectActiveChunks(AIPlayerEntity entity) {

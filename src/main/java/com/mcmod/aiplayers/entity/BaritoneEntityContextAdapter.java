@@ -2,6 +2,7 @@ package com.mcmod.aiplayers.entity;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.phys.Vec3;
 
 public final class BaritoneEntityContextAdapter {
@@ -19,8 +20,16 @@ public final class BaritoneEntityContextAdapter {
         return this.entity;
     }
 
+    public boolean isServerLevel() {
+        return this.entity.level() instanceof ServerLevel;
+    }
+
     public ServerLevel level() {
-        return (ServerLevel) this.entity.level();
+        return this.entity.level() instanceof ServerLevel serverLevel ? serverLevel : null;
+    }
+
+    public String dimensionId() {
+        return this.entity.level().dimension().toString();
     }
 
     public BlockPos playerFeet() {
@@ -75,8 +84,21 @@ public final class BaritoneEntityContextAdapter {
         return this.entity.runtimeFindNearbyDryStandPosition(center, horizontalRadius, verticalRadius);
     }
 
+    public boolean hasPathSupportBlocks() {
+        return this.entity.runtimeHasPathSupportBlocks();
+    }
+
+    public boolean mobGriefingAllowed() {
+        ServerLevel level = this.level();
+        return level != null && level.getGameRules().get(GameRules.MOB_GRIEFING);
+    }
+
     public BaritoneBlockStateInterfaceAdapter blockStateInterface() {
         return this.blockStateInterface;
+    }
+
+    public BaritoneBlockStateInterfaceAdapter blockStateInterface(ChunkSnapshotCache.RegionSnapshot snapshot) {
+        return new BaritoneBlockStateInterfaceAdapter(this.entity, snapshot);
     }
 
     public BaritonePlayerControllerAdapter playerController() {

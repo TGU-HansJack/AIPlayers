@@ -17,19 +17,18 @@ import net.minecraft.core.BlockPos;
 
 // Upstream reference: baritone-1.21.11/src/main/java/baritone/pathing/calc/AStarPathFinder.java
 public final class AStarPathFinder extends AbstractNodeCostSearch {
-    private static final int DEFAULT_NODE_LIMIT = 16000;
     private static final double COST_EPSILON = 1.0E-6D;
 
     private final int nodeLimit;
     private int nodesConsidered;
 
     public AStarPathFinder(BlockPos start, Goal goal, CalculationContext context) {
-        this(start, goal, context, DEFAULT_NODE_LIMIT);
+        this(start, goal, context, context == null ? 4096 : context.searchNodeLimit());
     }
 
     public AStarPathFinder(BlockPos start, Goal goal, CalculationContext context, int nodeLimit) {
         super(start, goal, context);
-        this.nodeLimit = Math.max(1024, nodeLimit);
+        this.nodeLimit = Math.max(512, nodeLimit);
     }
 
     public int getNodesConsidered() {
@@ -38,10 +37,10 @@ public final class AStarPathFinder extends AbstractNodeCostSearch {
 
     @Override
     protected PathCalculationResult calculate0(long primaryTimeoutMs, long failureTimeoutMs) {
-        if (this.goal == null) {
+        if (this.goal == null || this.context == null) {
             return new PathCalculationResult(PathCalculationResult.Type.FAILURE, null);
         }
-        BlockPos actualStart = this.context.context.resolveMovementTarget(this.start);
+        BlockPos actualStart = this.context.resolveMovementTarget(this.start);
         if (actualStart == null) {
             actualStart = this.start;
         }

@@ -57,6 +57,11 @@ final class PathManager {
     }
 
     boolean requestPath(PathGoal goal, double speedModifier) {
+        if (this.entity.level().isClientSide()) {
+            this.pathState = PathState.IDLE;
+            this.pathStatus = "???????";
+            return false;
+        }
         if (goal == null) {
             this.clear();
             this.pathStatus = "目标为空";
@@ -132,6 +137,12 @@ final class PathManager {
     }
 
     void tick() {
+        if (this.entity.level().isClientSide()) {
+            this.pathState = PathState.IDLE;
+            this.pathStatus = "???????";
+            this.currentPlan = new PathPlan(null, java.util.List.of(), "client_inactive");
+            return;
+        }
         if (this.targetGoal == null) {
             this.pathState = PathState.IDLE;
             this.pathStatus = "空闲";

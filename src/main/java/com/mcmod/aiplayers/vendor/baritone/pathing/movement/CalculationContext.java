@@ -1,11 +1,13 @@
 package com.mcmod.aiplayers.vendor.baritone.pathing.movement;
 
+import com.mcmod.aiplayers.entity.BaritoneBlockStateInterfaceAdapter;
 import com.mcmod.aiplayers.entity.BaritoneEntityContextAdapter;
+import com.mcmod.aiplayers.entity.ChunkSnapshotCache;
 import com.mcmod.aiplayers.vendor.baritone.utils.BlockStateInterface;
 import net.minecraft.core.BlockPos;
-import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.FluidTags;
+import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
@@ -13,29 +15,82 @@ import net.minecraft.world.level.block.state.BlockState;
 public class CalculationContext {
     public static final int MAX_STEP_HEIGHT = 3;
     public static final int MAX_DROP_HEIGHT = 4;
+    private static final int DEFAULT_NODE_LIMIT = 4096;
+    private static final long DEFAULT_PRIMARY_TIMEOUT_MS = 20L;
+    private static final long DEFAULT_FAILURE_TIMEOUT_MS = 45L;
 
     public final BaritoneEntityContextAdapter context;
     public final BlockStateInterface bsi;
+    public final ChunkSnapshotCache.RegionSnapshot snapshot;
+    private final boolean allowBreak;
+    private final boolean allowPlaceSupport;
+    private final int searchNodeLimit;
+    private final long primaryTimeoutMs;
+    private final long failureTimeoutMs;
 
     public CalculationContext(BaritoneEntityContextAdapter context) {
-        this.context = context;
-        this.bsi = new BlockStateInterface(context.blockStateInterface());
+        this(context, ChunkSnapshotCache.capture(context.level(), context.playerFeet(), context.playerFeet()), DEFAULT_NODE_LIMIT, DEFAULT_PRIMARY_TIMEOUT_MS, DEFAULT_FAILURE_TIMEOUT_MS);
     }
 
-    public ServerLevel level() {
-        return this.context.level();
+    public CalculationContext(BaritoneEntityContextAdapter context, ChunkSnapshotCache.RegionSnapshot snapshot, int searchNodeLimit) {
+        this(context, snapshot, searchNodeLimit, DEFAULT_PRIMARY_TIMEOUT_MS, DEFAULT_FAILURE_TIMEOUT_MS);
+    }
+
+    public CalculationContext(BaritoneEntityContextAdapter context, ChunkSnapshotCache.RegionSnapshot snapshot, int searchNodeLimit, long primaryTimeoutMs, long failureTimeoutMs) {
+        this.context = context;
+        this.snapshot = snapshot == null ? ChunkSnapshotCache.RegionSnapshot.empty() : snapshot;
+        BaritoneBlockStateInterfaceAdapter adapter = this.snapshot.chunks().isEmpty()
+                ? context.blockStateInterface()
+                : context.blockStateInterface(this.snapshot);
+        this.bsi = new BlockStateInterface(adapter);
+        this.allowBreak = context.mobGriefingAllowed();
+        this.allowPlaceSupport = this.allowBreak && context.hasPathSupportBlocks();
+        this.searchNodeLimit = Math.max(512, searchNodeLimit);
+        this.primaryTimeoutMs = Math.max(5L, primaryTimeoutMs);
+        this.failureTimeoutMs = Math.max(this.primaryTimeoutMs, failureTimeoutMs);
     }
 
     public boolean canStandAt(BlockPos pos, boolean allowWater) {
-        return this.context.canStandAt(pos, allowWater);
+        if (pos == null || !this.bsi.isLoaded(pos) || !this.bsi.isLoaded(pos.above()) || !this.bsi.isLoaded(pos.below())) {
+            return false;
+        }
+        BlockState feet = this.bsi.get(pos);
+        BlockState head = this.bsi.get(pos.above());
+        BlockState floor = this.bsi.get(pos.below());
+        boolean feetInWater = this.bsi.getFluid(pos).is(FluidTags.WATER);
+        boolean headInWater = this.bsi.getFluid(pos.above()).is(FluidTags.WATER);
+        boolean feetClear = this.isPassable(feet, pos) && !this.bsi.getFluid(pos).is(FluidTags.LAVA) && (allowWater || !feetInWater);
+        boolean headClear = this.isPassable(head, pos.above()) && !this.bsi.getFluid(pos.above()).is(FluidTags.LAVA) && (allowWater || !headInWater);
+        boolean floorStable = !this.isPassable(floor, pos.below()) && !floor.is(BlockTags.LEAVES) && !this.bsi.getFluid(pos.below()).is(FluidTags.LAVA);
+        if (allowWater && (feetInWater || headInWater)) {
+            return feetClear && headClear;
+        }
+        return feetClear && headClear && floorStable;
     }
 
     public boolean canBreakForPath(BlockPos pos) {
-        return this.context.playerController().canBreakBlock(pos);
+        if (!this.allowBreak || pos == null || !this.bsi.isLoaded(pos)) {
+            return false;
+        }
+        BlockState state = this.bsi.get(pos);
+        if (state.isAir() || this.bsi.getFluid(pos).is(FluidTags.LAVA)) {
+            return false;
+        }
+        if (state.is(Blocks.BEDROCK) || state.is(Blocks.BARRIER) || state.is(Blocks.END_PORTAL_FRAME) || state.is(Blocks.COMMAND_BLOCK) || state.is(Blocks.REPEATING_COMMAND_BLOCK) || state.is(Blocks.CHAIN_COMMAND_BLOCK)) {
+            return false;
+        }
+        return state.getDestroySpeed(EmptyBlockGetter.INSTANCE, pos) >= 0.0F;
     }
 
     public boolean canPlaceSupportAt(BlockPos pos) {
-        return this.context.playerController().canPlaceSupport(pos);
+        if (!this.allowPlaceSupport || pos == null || !this.bsi.isLoaded(pos) || !this.bsi.isLoaded(pos.below())) {
+            return false;
+        }
+        if (!this.bsi.get(pos).isAir()) {
+            return false;
+        }
+        BlockState floor = this.bsi.get(pos.below());
+        return !this.isPassable(floor, pos.below()) && !this.bsi.getFluid(pos.below()).is(FluidTags.LAVA);
     }
 
     public boolean canOccupyAfterBreak(BlockPos standPos, BlockPos breakPos) {
@@ -51,8 +106,8 @@ public class CalculationContext {
         }
         BlockState feetState = this.bsi.get(feetPos);
         BlockState headState = this.bsi.get(headPos);
-        boolean feetClear = breakFeet || feetState.getCollisionShape(this.level(), feetPos).isEmpty();
-        boolean headClear = breakHead || headState.getCollisionShape(this.level(), headPos).isEmpty();
+        boolean feetClear = breakFeet || this.isPassable(feetState, feetPos);
+        boolean headClear = breakHead || this.isPassable(headState, headPos);
         if (!feetClear || !headClear) {
             return false;
         }
@@ -66,7 +121,7 @@ public class CalculationContext {
         }
         BlockPos floorPos = standPos.below();
         BlockState floorState = this.bsi.get(floorPos);
-        boolean stableFloor = !floorState.getCollisionShape(this.level(), floorPos).isEmpty() && !this.bsi.getFluid(floorPos).is(FluidTags.LAVA);
+        boolean stableFloor = !this.isPassable(floorState, floorPos) && !this.bsi.getFluid(floorPos).is(FluidTags.LAVA);
         return stableFloor || this.canPlaceSupportAt(floorPos);
     }
 
@@ -76,19 +131,14 @@ public class CalculationContext {
         }
         BlockPos feetPos = standPos;
         BlockPos headPos = standPos.above();
-        BlockState feetState = this.bsi.get(feetPos);
-        BlockState headState = this.bsi.get(headPos);
-        if (!feetState.getCollisionShape(this.level(), feetPos).isEmpty() || !headState.getCollisionShape(this.level(), headPos).isEmpty()) {
+        if (!this.isPassable(this.bsi.get(feetPos), feetPos) || !this.isPassable(this.bsi.get(headPos), headPos)) {
             return false;
         }
         if (this.bsi.getFluid(feetPos).is(FluidTags.LAVA) || this.bsi.getFluid(headPos).is(FluidTags.LAVA)) {
             return false;
         }
         BlockState floorState = this.bsi.get(supportPos);
-        if (!floorState.getCollisionShape(this.level(), supportPos).isEmpty()) {
-            return true;
-        }
-        return this.canPlaceSupportAt(supportPos);
+        return !this.isPassable(floorState, supportPos) || this.canPlaceSupportAt(supportPos);
     }
 
     public boolean isWaterNode(BlockPos pos) {
@@ -157,9 +207,6 @@ public class CalculationContext {
         if (this.isLavaAdjacent(pos)) {
             penalty += 2.2D;
         }
-        if (this.isDarkNode(pos)) {
-            penalty += 0.18D;
-        }
         return penalty;
     }
 
@@ -167,7 +214,58 @@ public class CalculationContext {
         if (from == null || !this.isWaterNode(from)) {
             return null;
         }
-        return this.context.findNearbyDryStandPosition(from, 6, 4);
+        return this.findNearbyStandPosition(from, 6, 4, false, false);
+    }
+
+    public BlockPos resolveMovementTarget(BlockPos pos) {
+        if (pos == null) {
+            return null;
+        }
+        if (this.canStandAt(pos, true)) {
+            return pos.immutable();
+        }
+        return this.findNearbyStandPosition(pos, 6, 5, true, true);
+    }
+
+    public int searchNodeLimit() {
+        return this.searchNodeLimit;
+    }
+
+    public long primaryTimeoutMs() {
+        return this.primaryTimeoutMs;
+    }
+
+    public long failureTimeoutMs() {
+        return this.failureTimeoutMs;
+    }
+
+    public long snapshotSignature() {
+        return this.snapshot.signature();
+    }
+
+    private BlockPos findNearbyStandPosition(BlockPos center, int horizontalRadius, int verticalRadius, boolean allowWater, boolean preferNearY) {
+        BlockPos best = null;
+        double bestScore = Double.MAX_VALUE;
+        for (int x = -horizontalRadius; x <= horizontalRadius; x++) {
+            for (int y = -verticalRadius; y <= verticalRadius; y++) {
+                for (int z = -horizontalRadius; z <= horizontalRadius; z++) {
+                    BlockPos candidate = center.offset(x, y, z);
+                    if (!this.canStandAt(candidate, allowWater)) {
+                        continue;
+                    }
+                    double score = x * x + z * z + y * y * (preferNearY ? 1.8D : 0.9D);
+                    if (score < bestScore) {
+                        bestScore = score;
+                        best = candidate.immutable();
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    private boolean isPassable(BlockState state, BlockPos pos) {
+        return state == null || state.getCollisionShape(EmptyBlockGetter.INSTANCE, pos).isEmpty();
     }
 
     private boolean isLavaAdjacent(BlockPos pos) {
@@ -180,9 +278,5 @@ public class CalculationContext {
             }
         }
         return false;
-    }
-
-    private boolean isDarkNode(BlockPos pos) {
-        return !this.level().canSeeSky(pos) && this.level().getMaxLocalRawBrightness(pos) <= 6;
     }
 }
