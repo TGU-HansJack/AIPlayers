@@ -3,6 +3,7 @@ package com.mcmod.aiplayers;
 import com.mcmod.aiplayers.ai.AIServiceManager;
 import com.mcmod.aiplayers.client.AIPlayersClient;
 import com.mcmod.aiplayers.entity.AgentConfigManager;
+import com.mcmod.aiplayers.knowledge.KnowledgeManager;
 import com.mcmod.aiplayers.registry.ModEntities;
 import com.mcmod.aiplayers.registry.ModMenus;
 import com.mcmod.aiplayers.system.AIPlayersChatHandler;
@@ -29,6 +30,7 @@ public class AIPlayersMod {
 
         AIServiceManager.initialize();
         AgentConfigManager.initialize();
+        KnowledgeManager.initialize();
         ModEntities.ENTITY_TYPES.register(modBusGroup);
         ModMenus.MENU_TYPES.register(modBusGroup);
         EntityAttributeCreationEvent.BUS.addListener(ModEntities::registerAttributes);

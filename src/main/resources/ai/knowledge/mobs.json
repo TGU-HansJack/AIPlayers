@@ -1,0 +1,84 @@
+{
+  "minecraft:zombie": {
+    "family": "undead",
+    "preferredWeapon": "sword",
+    "weaknessTags": [
+      "smite",
+      "shield"
+    ],
+    "danger": 3,
+    "notes": "近战慢速，保持走位并压制。"
+  },
+  "minecraft:husk": {
+    "family": "undead",
+    "preferredWeapon": "sword",
+    "weaknessTags": [
+      "smite",
+      "shield"
+    ],
+    "danger": 3,
+    "notes": "与僵尸类似，避免长时间贴脸。"
+  },
+  "minecraft:drowned": {
+    "family": "undead",
+    "preferredWeapon": "sword",
+    "weaknessTags": [
+      "smite",
+      "shield"
+    ],
+    "danger": 4,
+    "notes": "若持三叉戟优先举盾规避投掷。"
+  },
+  "minecraft:skeleton": {
+    "family": "undead",
+    "preferredWeapon": "sword",
+    "weaknessTags": [
+      "smite",
+      "shield",
+      "zigzag"
+    ],
+    "danger": 4,
+    "notes": "弓箭威胁高，优先蛇形接近。"
+  },
+  "minecraft:spider": {
+    "family": "arthropod",
+    "preferredWeapon": "sword",
+    "weaknessTags": [
+      "sweeping",
+      "knockback"
+    ],
+    "danger": 3,
+    "notes": "跳扑频繁，保持正面视角防止绕后。"
+  },
+  "minecraft:creeper": {
+    "family": "explosive",
+    "preferredWeapon": "sword",
+    "weaknessTags": [
+      "distance",
+      "shield"
+    ],
+    "danger": 5,
+    "notes": "引爆前迅速后撤，避免贴身连锁爆炸。"
+  },
+  "minecraft:enderman": {
+    "family": "teleport",
+    "preferredWeapon": "sword",
+    "weaknessTags": [
+      "water",
+      "shield",
+      "safe_height"
+    ],
+    "danger": 5,
+    "notes": "在水边或低矮空间作战更安全。"
+  },
+  "minecraft:witch": {
+    "family": "magic",
+    "preferredWeapon": "sword",
+    "weaknessTags": [
+      "burst_damage",
+      "gap_close"
+    ],
+    "danger": 4,
+    "notes": "避免拉扯过久，优先贴身快速击杀。"
+  }
+}

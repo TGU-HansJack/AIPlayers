@@ -1,0 +1,155 @@
+{
+  "minecraft:oak_log": {
+    "type": "tree_log",
+    "hardness": 2.0,
+    "tool": "axe",
+    "breakTime": 1.0
+  },
+  "minecraft:birch_log": {
+    "type": "tree_log",
+    "hardness": 2.0,
+    "tool": "axe",
+    "breakTime": 1.0
+  },
+  "minecraft:spruce_log": {
+    "type": "tree_log",
+    "hardness": 2.0,
+    "tool": "axe",
+    "breakTime": 1.0
+  },
+  "minecraft:jungle_log": {
+    "type": "tree_log",
+    "hardness": 2.0,
+    "tool": "axe",
+    "breakTime": 1.0
+  },
+  "minecraft:acacia_log": {
+    "type": "tree_log",
+    "hardness": 2.0,
+    "tool": "axe",
+    "breakTime": 1.0
+  },
+  "minecraft:dark_oak_log": {
+    "type": "tree_log",
+    "hardness": 2.0,
+    "tool": "axe",
+    "breakTime": 1.0
+  },
+  "minecraft:mangrove_log": {
+    "type": "tree_log",
+    "hardness": 2.0,
+    "tool": "axe",
+    "breakTime": 1.0
+  },
+  "minecraft:cherry_log": {
+    "type": "tree_log",
+    "hardness": 2.0,
+    "tool": "axe",
+    "breakTime": 1.0
+  },
+  "minecraft:stone": {
+    "type": "rock",
+    "hardness": 1.5,
+    "tool": "pickaxe"
+  },
+  "minecraft:deepslate": {
+    "type": "rock",
+    "hardness": 3.0,
+    "tool": "pickaxe"
+  },
+  "minecraft:coal_ore": {
+    "type": "ore",
+    "hardness": 3.0,
+    "tool": "pickaxe"
+  },
+  "minecraft:deepslate_coal_ore": {
+    "type": "ore",
+    "hardness": 4.5,
+    "tool": "pickaxe"
+  },
+  "minecraft:iron_ore": {
+    "type": "ore",
+    "hardness": 3.0,
+    "tool": "stone_pickaxe"
+  },
+  "minecraft:deepslate_iron_ore": {
+    "type": "ore",
+    "hardness": 4.5,
+    "tool": "stone_pickaxe"
+  },
+  "minecraft:copper_ore": {
+    "type": "ore",
+    "hardness": 3.0,
+    "tool": "stone_pickaxe"
+  },
+  "minecraft:deepslate_copper_ore": {
+    "type": "ore",
+    "hardness": 4.5,
+    "tool": "stone_pickaxe"
+  },
+  "minecraft:gold_ore": {
+    "type": "ore",
+    "hardness": 3.0,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:deepslate_gold_ore": {
+    "type": "ore",
+    "hardness": 4.5,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:redstone_ore": {
+    "type": "ore",
+    "hardness": 3.0,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:deepslate_redstone_ore": {
+    "type": "ore",
+    "hardness": 4.5,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:lapis_ore": {
+    "type": "ore",
+    "hardness": 3.0,
+    "tool": "stone_pickaxe"
+  },
+  "minecraft:deepslate_lapis_ore": {
+    "type": "ore",
+    "hardness": 4.5,
+    "tool": "stone_pickaxe"
+  },
+  "minecraft:emerald_ore": {
+    "type": "ore",
+    "hardness": 3.0,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:deepslate_emerald_ore": {
+    "type": "ore",
+    "hardness": 4.5,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:diamond_ore": {
+    "type": "ore",
+    "hardness": 3.0,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:deepslate_diamond_ore": {
+    "type": "ore",
+    "hardness": 4.5,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:nether_quartz_ore": {
+    "type": "ore",
+    "hardness": 3.0,
+    "tool": "pickaxe"
+  },
+  "minecraft:nether_gold_ore": {
+    "type": "ore",
+    "hardness": 3.0,
+    "tool": "pickaxe"
+  },
+  "minecraft:ancient_debris": {
+    "type": "ore",
+    "hardness": 30.0,
+    "tool": "diamond_pickaxe"
+  }
+}

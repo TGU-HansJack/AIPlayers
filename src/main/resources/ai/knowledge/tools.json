@@ -1,0 +1,42 @@
+{
+  "wooden_pickaxe": {
+    "miningLevel": 1,
+    "speed": 2.0
+  },
+  "stone_pickaxe": {
+    "miningLevel": 2,
+    "speed": 4.0
+  },
+  "iron_pickaxe": {
+    "miningLevel": 3,
+    "speed": 6.0
+  },
+  "diamond_pickaxe": {
+    "miningLevel": 4,
+    "speed": 8.0
+  },
+  "netherite_pickaxe": {
+    "miningLevel": 5,
+    "speed": 9.0
+  },
+  "wooden_axe": {
+    "miningLevel": 1,
+    "speed": 2.0
+  },
+  "stone_axe": {
+    "miningLevel": 2,
+    "speed": 4.0
+  },
+  "iron_axe": {
+    "miningLevel": 3,
+    "speed": 6.0
+  },
+  "diamond_axe": {
+    "miningLevel": 4,
+    "speed": 8.0
+  },
+  "netherite_axe": {
+    "miningLevel": 5,
+    "speed": 9.0
+  }
+}

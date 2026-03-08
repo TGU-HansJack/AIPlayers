@@ -3,6 +3,7 @@ package com.mcmod.aiplayers.entity;
 import com.mcmod.aiplayers.ai.AIServiceManager;
 import com.mcmod.aiplayers.ai.AIServiceResponse;
 import com.mcmod.aiplayers.ai.AITaskPlanResponse;
+import com.mcmod.aiplayers.knowledge.KnowledgeManager;
 import com.mcmod.aiplayers.menu.AIPlayerBackpackMenu;
 import com.mcmod.aiplayers.registry.ModEntities;
 import com.mcmod.aiplayers.system.AILongTermMemoryStore;
@@ -708,6 +709,7 @@ public class AIPlayerEntity extends PathfinderMob {
                 + "；认知=" + this.getCognitiveSummary()
                 + "；观察=" + this.getObservationSummary()
                 + "；LLM=" + AIServiceManager.getLastStatusText()
+                + "；知识库=" + (KnowledgeManager.isInitialized() ? "已加载" : "未加载")
                 + "；最近反馈=" + this.lastTaskFeedback;
     }
 
@@ -1898,7 +1900,8 @@ public class AIPlayerEntity extends PathfinderMob {
         if (this.isLogItem(stack) || this.isPlankItem(item)) {
             return 3;
         }
-        if (this.isOreMaterial(item) || this.isInterestingOre(item instanceof BlockItem blockItem ? blockItem.getBlock().defaultBlockState() : Blocks.AIR.defaultBlockState())) {
+        if (this.isOreMaterial(item)
+                || this.isInterestingOre(item instanceof BlockItem blockItem ? blockItem.getBlock().defaultBlockState() : Blocks.AIR.defaultBlockState())) {
             return 4;
         }
         return 5;
@@ -1930,6 +1933,10 @@ public class AIPlayerEntity extends PathfinderMob {
     }
 
     private ItemStack findBestToolInBackpack(Predicate<Item> matcher, Item fallback) {
+        return this.findBestToolInBackpack(matcher, fallback, Integer.MIN_VALUE);
+    }
+
+    private ItemStack findBestToolInBackpack(Predicate<Item> matcher, Item fallback, int minimumScore) {
         ItemStack best = ItemStack.EMPTY;
         int bestScore = Integer.MIN_VALUE;
         for (ItemStack stack : this.backpack) {
@@ -1937,12 +1944,59 @@ public class AIPlayerEntity extends PathfinderMob {
                 continue;
             }
             int score = this.getToolScore(stack.getItem());
+            if (score < minimumScore) {
+                continue;
+            }
             if (score > bestScore) {
                 bestScore = score;
                 best = stack;
             }
         }
-        return best.isEmpty() ? new ItemStack(fallback) : best;
+        if (!best.isEmpty()) {
+            return best;
+        }
+        if (this.getToolScore(fallback) < minimumScore) {
+            return ItemStack.EMPTY;
+        }
+        return new ItemStack(fallback);
+    }
+
+    private ItemStack findBestToolForRequirement(String requirement) {
+        if (requirement == null || requirement.isBlank()) {
+            return ItemStack.EMPTY;
+        }
+        String normalized = requirement.toLowerCase(Locale.ROOT).trim();
+        return switch (normalized) {
+            case "axe" -> this.findBestToolInBackpack(this::isAxeItem, Items.STONE_AXE);
+            case "sword" -> this.findBestToolInBackpack(this::isSwordItem, Items.IRON_SWORD);
+            case "bow" -> this.countBackpackItem(Items.BOW) > 0 ? new ItemStack(Items.BOW) : ItemStack.EMPTY;
+            case "pickaxe" -> this.findBestToolInBackpack(this::isPickaxeItem, Items.STONE_PICKAXE);
+            case "stone_pickaxe" -> this.findBestToolInBackpack(this::isPickaxeItem, Items.STONE_PICKAXE, 3);
+            case "iron_pickaxe" -> this.findBestToolInBackpack(this::isPickaxeItem, Items.IRON_PICKAXE, 4);
+            case "diamond_pickaxe" -> this.findBestToolInBackpack(this::isPickaxeItem, Items.DIAMOND_PICKAXE, 5);
+            case "netherite_pickaxe" -> this.findBestToolInBackpack(this::isPickaxeItem, Items.NETHERITE_PICKAXE, 6);
+            case "melee" -> this.findBestCombatItem();
+            default -> ItemStack.EMPTY;
+        };
+    }
+
+    private void ensureKnowledgePreferredTool(BlockState state, MiningMode mode) {
+        if (state == null || state.isAir()) {
+            return;
+        }
+        String requirement = KnowledgeManager.getRecommendedTool(state);
+        ItemStack preferred = this.findBestToolForRequirement(requirement);
+        if (!preferred.isEmpty()) {
+            this.setItemSlot(EquipmentSlot.MAINHAND, preferred.copy());
+            return;
+        }
+        if (mode == MiningMode.HARVEST_WOOD) {
+            this.runtimePrepareHarvestTool(true);
+            return;
+        }
+        if (mode == MiningMode.HARVEST_ORE || mode == MiningMode.AUXILIARY) {
+            this.runtimePrepareHarvestTool(false);
+        }
     }
 
     private ItemStack findBestCombatItem() {
@@ -2815,7 +2869,8 @@ public class AIPlayerEntity extends PathfinderMob {
                     if (!visited.add(candidate)) {
                         continue;
                     }
-                    if (!this.level().getBlockState(candidate).is(BlockTags.LOGS)) {
+                    BlockState candidateState = this.level().getBlockState(candidate);
+                    if (!KnowledgeManager.isTreeLog(candidateState) && !candidateState.is(BlockTags.LOGS)) {
                         continue;
                     }
                     frontier.add(candidate);
@@ -3164,6 +3219,7 @@ public class AIPlayerEntity extends PathfinderMob {
         if (state.getDestroySpeed(serverLevel, pos) < 0.0F) {
             return false;
         }
+        this.ensureKnowledgePreferredTool(state, mode);
 
         if (this.isMiningLocked() && !this.isMiningInProgress(pos, mode)) {
             return false;
@@ -3310,6 +3366,9 @@ public class AIPlayerEntity extends PathfinderMob {
     }
 
     private boolean tryCraftBread() {
+        if (this.tryCraftByKnowledge("minecraft:bread", "面包", 4)) {
+            return true;
+        }
         while (this.countBackpackItem(Items.BREAD) < 4 && this.countBackpackItem(Items.WHEAT) >= 3) {
             this.consumeBackpackItem(Items.WHEAT, 3);
             this.storeInBackpack(new ItemStack(Items.BREAD));
@@ -3321,6 +3380,10 @@ public class AIPlayerEntity extends PathfinderMob {
     }
 
     private boolean tryCraftStoneTool(Item toolItem, String toolName) {
+        Identifier toolId = BuiltInRegistries.ITEM.getKey(toolItem);
+        if (toolId != null && this.tryCraftByKnowledge(toolId.toString(), toolName, 1)) {
+            return true;
+        }
         if (this.countBackpackItem(toolItem) > 0) {
             return false;
         }
@@ -3343,6 +3406,105 @@ public class AIPlayerEntity extends PathfinderMob {
         this.storeInBackpack(new ItemStack(toolItem));
         this.remember("合成", "制作" + toolName);
         return true;
+    }
+
+    private boolean tryCraftByKnowledge(String outputId, String outputName, int minimumDesiredCount) {
+        if (outputId == null || outputId.isBlank()) {
+            return false;
+        }
+        if (this.countBackpackItemById(outputId) >= minimumDesiredCount) {
+            return false;
+        }
+        return this.craftOneRecipeByKnowledge(outputId, outputName, 3);
+    }
+
+    private boolean craftOneRecipeByKnowledge(String outputId, String outputName, int depth) {
+        if (depth <= 0 || outputId == null || outputId.isBlank()) {
+            return false;
+        }
+        KnowledgeManager.RecipeKnowledge recipe = KnowledgeManager.getRecipe(outputId);
+        if (recipe == null || recipe.inputs() == null || recipe.inputs().isEmpty()) {
+            return false;
+        }
+
+        for (Map.Entry<String, Integer> ingredient : recipe.inputs().entrySet()) {
+            String ingredientId = ingredient.getKey();
+            int needed = Math.max(1, ingredient.getValue() == null ? 1 : ingredient.getValue());
+            if (!this.ensureKnowledgeIngredient(ingredientId, needed, depth - 1)) {
+                return false;
+            }
+        }
+
+        for (Map.Entry<String, Integer> ingredient : recipe.inputs().entrySet()) {
+            String ingredientId = ingredient.getKey();
+            int needed = Math.max(1, ingredient.getValue() == null ? 1 : ingredient.getValue());
+            if (!this.consumeBackpackItemById(ingredientId, needed)) {
+                return false;
+            }
+        }
+
+        Item outputItem = this.resolveItemById(outputId);
+        if (outputItem == Items.AIR) {
+            return false;
+        }
+        int outputCount = KnowledgeManager.getRecipeOutputCount(outputId);
+        this.storeInBackpack(new ItemStack(outputItem, outputCount));
+        String resolvedName = outputName == null || outputName.isBlank() ? this.getItemDisplayNameById(outputId) : outputName;
+        this.lastObservation = "已根据知识库合成" + resolvedName + "。";
+        this.remember("合成", "知识库制作" + resolvedName + "x" + outputCount);
+        return true;
+    }
+
+    private boolean ensureKnowledgeIngredient(String ingredientId, int needed, int depth) {
+        if (ingredientId == null || ingredientId.isBlank()) {
+            return false;
+        }
+        if (this.countBackpackItemById(ingredientId) >= needed) {
+            return true;
+        }
+        if (this.isPlankItemId(ingredientId)) {
+            return this.ensurePlanksCount(needed);
+        }
+        if (depth <= 0) {
+            return false;
+        }
+
+        KnowledgeManager.RecipeKnowledge ingredientRecipe = KnowledgeManager.getRecipe(ingredientId);
+        if (ingredientRecipe == null || ingredientRecipe.inputs() == null || ingredientRecipe.inputs().isEmpty()) {
+            return false;
+        }
+
+        int current = this.countBackpackItemById(ingredientId);
+        int missing = Math.max(0, needed - current);
+        int outputCount = KnowledgeManager.getRecipeOutputCount(ingredientId);
+        int craftTimes = (int)Math.ceil(missing / (double)Math.max(1, outputCount));
+        for (int i = 0; i < craftTimes; i++) {
+            if (!this.craftOneRecipeByKnowledge(ingredientId, this.getItemDisplayNameById(ingredientId), depth - 1)) {
+                return false;
+            }
+        }
+        return this.countBackpackItemById(ingredientId) >= needed;
+    }
+
+    private boolean isPlankItemId(String itemId) {
+        return itemId != null && itemId.endsWith("_planks");
+    }
+
+    private Item resolveItemById(String itemId) {
+        Identifier identifier = Identifier.tryParse(itemId);
+        if (identifier == null) {
+            return Items.AIR;
+        }
+        return BuiltInRegistries.ITEM.get(identifier).map(reference -> reference.value()).orElse(Items.AIR);
+    }
+
+    private String getItemDisplayNameById(String itemId) {
+        Item item = this.resolveItemById(itemId);
+        if (item != Items.AIR) {
+            return this.getItemDisplayName(item);
+        }
+        int split = itemId.indexOf(':');
+        return split >= 0 ? itemId.substring(split + 1) : itemId;
     }
 
     private boolean ensurePlanksCount(int minimum) {
@@ -3553,8 +3715,15 @@ public class AIPlayerEntity extends PathfinderMob {
         notices.add((this.level().getDayTime() % 24000L) >= 12500L ? "夜晚" : "白天");
         if (this.observedHostile != null) {
             notices.add("敌对生物=" + this.observedHostile.getName().getString());
+            String weaknessHint = KnowledgeManager.getMobWeaknessHint(this.observedHostile);
+            if (!weaknessHint.isBlank()) {
+                notices.add("弱点=" + weaknessHint);
+            }
             if (previousHostile == null || !previousHostile.equals(this.observedHostile)) {
                 this.remember("感知", "发现敌对目标 " + this.observedHostile.getName().getString());
+                if (!weaknessHint.isBlank()) {
+                    this.remember("战斗知识", this.observedHostile.getName().getString() + " -> " + weaknessHint);
+                }
             }
         }
         if (this.isOwnerUnderThreat()) {
@@ -3640,9 +3809,9 @@ public class AIPlayerEntity extends PathfinderMob {
 
         BlockState state = this.level().getBlockState(pos);
         if (woodTask) {
-            return state.is(BlockTags.LOGS);
+            return KnowledgeManager.isTreeLog(state) || state.is(BlockTags.LOGS);
         }
-        return this.isInterestingOre(state) && (this.isExposed(pos) || this.findAdjacentHarvestCover(pos, false) != null);
+        return this.isInterestingOre(state, pos) && (this.isExposed(pos) || this.findAdjacentHarvestCover(pos, false) != null);
     }
 
     private BlockPos normalizeHarvestTarget(BlockPos pos, boolean woodTask) {
@@ -3651,7 +3820,8 @@ public class AIPlayerEntity extends PathfinderMob {
         }
 
         BlockPos current = pos;
-        while (this.level().getBlockState(current.below()).is(BlockTags.LOGS)) {
+        while (KnowledgeManager.isTreeLog(this.level().getBlockState(current.below()))
+                || this.level().getBlockState(current.below()).is(BlockTags.LOGS)) {
             current = current.below();
         }
 
@@ -3661,7 +3831,8 @@ public class AIPlayerEntity extends PathfinderMob {
             for (int y = 0; y <= 2; y++) {
                 for (int z = -1; z <= 1; z++) {
                     BlockPos candidate = current.offset(x, y, z);
-                    if (!this.level().getBlockState(candidate).is(BlockTags.LOGS)) {
+                    BlockState candidateState = this.level().getBlockState(candidate);
+                    if (!KnowledgeManager.isTreeLog(candidateState) && !candidateState.is(BlockTags.LOGS)) {
                         continue;
                     }
 
@@ -3718,8 +3889,8 @@ public class AIPlayerEntity extends PathfinderMob {
                     cursor.set(origin.getX() + x, origin.getY() + y, origin.getZ() + z);
                     BlockState state = this.level().getBlockState(cursor);
                     boolean matches = woodTask
-                            ? state.is(BlockTags.LOGS)
-                            : this.isInterestingOre(state) && (this.isExposed(cursor) || this.findAdjacentHarvestCover(cursor, false) != null);
+                            ? (KnowledgeManager.isTreeLog(state) || state.is(BlockTags.LOGS))
+                            : this.isInterestingOre(state, cursor) && (this.isExposed(cursor) || this.findAdjacentHarvestCover(cursor, false) != null);
                     if (!matches) {
                         continue;
                     }
@@ -4017,7 +4188,8 @@ public class AIPlayerEntity extends PathfinderMob {
         if (!(item instanceof BlockItem blockItem)) {
             return false;
         }
-        return blockItem.getBlock().defaultBlockState().is(BlockTags.LOGS);
+        BlockState state = blockItem.getBlock().defaultBlockState();
+        return KnowledgeManager.isTreeLog(state) || state.is(BlockTags.LOGS);
     }
 
     private int countAvailableBuildingUnits() {
@@ -4038,6 +4210,14 @@ public class AIPlayerEntity extends PathfinderMob {
             }
         }
         return total;
+    }
+
+    private int countBackpackItemById(String itemId) {
+        Item item = this.resolveItemById(itemId);
+        if (item == Items.AIR) {
+            return 0;
+        }
+        return this.countBackpackItem(item);
     }
 
     private boolean consumeBackpackItem(Item item, int count) {
@@ -4062,7 +4242,29 @@ public class AIPlayerEntity extends PathfinderMob {
         return false;
     }
 
+    private boolean consumeBackpackItemById(String itemId, int count) {
+        Item item = this.resolveItemById(itemId);
+        if (item == Items.AIR) {
+            return false;
+        }
+        return this.consumeBackpackItem(item, count);
+    }
+
     private boolean isInterestingOre(BlockState state) {
+        if (KnowledgeManager.isKnownOre(state)) {
+            return true;
+        }
+        Identifier key = BuiltInRegistries.BLOCK.getKey(state.getBlock());
+        return key != null && (key.getPath().endsWith("_ore") || key.getPath().contains("ancient_debris"));
+    }
+
+    private boolean isInterestingOre(BlockState state, BlockPos pos) {
+        if (pos == null) {
+            return this.isInterestingOre(state);
+        }
+        if (KnowledgeManager.isKnownOre(state, pos.getY())) {
+            return true;
+        }
         Identifier key = BuiltInRegistries.BLOCK.getKey(state.getBlock());
         return key != null && (key.getPath().endsWith("_ore") || key.getPath().contains("ancient_debris"));
     }
@@ -4850,6 +5052,7 @@ public class AIPlayerEntity extends PathfinderMob {
         if (threat != null && threat.isAlive()) {
             this.setTarget(threat);
             this.setForcedLookTarget(threat.getEyePosition(), 8);
+            this.equipPreferredWeaponForThreat(threat);
         }
         this.shieldGuardTicks = Math.max(this.shieldGuardTicks, arrowThreat ? 18 : 10);
         if (this.getOffhandItem().getItem() == Items.SHIELD) {
@@ -4865,6 +5068,17 @@ public class AIPlayerEntity extends PathfinderMob {
         }
         if (this.countBackpackItem(Items.SHIELD) > 0 || this.getOffhandItem().isEmpty()) {
             this.setItemSlot(EquipmentSlot.OFFHAND, new ItemStack(Items.SHIELD));
+        }
+    }
+
+    private void equipPreferredWeaponForThreat(LivingEntity threat) {
+        if (threat == null || !threat.isAlive()) {
+            return;
+        }
+        String requirement = KnowledgeManager.getPreferredWeaponForMob(threat);
+        ItemStack preferred = this.findBestToolForRequirement(requirement);
+        if (!preferred.isEmpty()) {
+            this.setItemSlot(EquipmentSlot.MAINHAND, preferred.copy());
         }
     }
 

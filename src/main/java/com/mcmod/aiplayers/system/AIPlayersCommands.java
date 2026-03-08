@@ -5,6 +5,7 @@ import com.mcmod.aiplayers.entity.AIPlayerAction;
 import com.mcmod.aiplayers.entity.AgentConfigManager;
 import com.mcmod.aiplayers.entity.AIPlayerEntity;
 import com.mcmod.aiplayers.entity.AIPlayerMode;
+import com.mcmod.aiplayers.knowledge.KnowledgeManager;
 import com.mcmod.aiplayers.system.BlueprintRegistry;
 import com.mcmod.aiplayers.registry.ModEntities;
 import com.mojang.brigadier.CommandDispatcher;
@@ -72,7 +73,10 @@ public final class AIPlayersCommands {
                         .then(Commands.literal("status").executes(AIPlayersCommands::apiStatus))
                         .then(Commands.literal("reload").executes(AIPlayersCommands::apiReload))
                         .then(Commands.literal("enable").executes(AIPlayersCommands::apiEnable))
-                        .then(Commands.literal("disable").executes(AIPlayersCommands::apiDisable))));
+                        .then(Commands.literal("disable").executes(AIPlayersCommands::apiDisable)))
+                .then(Commands.literal("knowledge")
+                        .then(Commands.literal("reload").executes(AIPlayersCommands::knowledgeReload))
+                        .then(Commands.literal("status").executes(AIPlayersCommands::knowledgeStatus))));
     }
 
     private static int spawn(CommandContext<CommandSourceStack> context, String name) throws CommandSyntaxException {
@@ -189,6 +193,18 @@ public final class AIPlayersCommands {
         AIServiceManager.setEnabled(false);
         context.getSource().sendSuccess(() -> Component.literal("已关闭 AI 接口。"), false);
         context.getSource().sendSuccess(() -> Component.literal(AIServiceManager.getStatusSummary()), false);
+        return 1;
+    }
+
+    private static int knowledgeReload(CommandContext<CommandSourceStack> context) {
+        KnowledgeManager.reload();
+        context.getSource().sendSuccess(() -> Component.literal("已热更新知识库。"), false);
+        context.getSource().sendSuccess(() -> Component.literal("知识库状态：" + KnowledgeManager.getStatusSummary()), false);
+        return 1;
+    }
+
+    private static int knowledgeStatus(CommandContext<CommandSourceStack> context) {
+        context.getSource().sendSuccess(() -> Component.literal("知识库状态：" + KnowledgeManager.getStatusSummary()), false);
         return 1;
     }
 

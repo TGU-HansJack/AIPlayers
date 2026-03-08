@@ -1,0 +1,97 @@
+{
+  "minecraft:coal_ore": {
+    "minY": -64,
+    "maxY": 256,
+    "tool": "pickaxe"
+  },
+  "minecraft:deepslate_coal_ore": {
+    "minY": -64,
+    "maxY": 32,
+    "tool": "pickaxe"
+  },
+  "minecraft:iron_ore": {
+    "minY": -24,
+    "maxY": 256,
+    "tool": "stone_pickaxe"
+  },
+  "minecraft:deepslate_iron_ore": {
+    "minY": -64,
+    "maxY": 24,
+    "tool": "stone_pickaxe"
+  },
+  "minecraft:copper_ore": {
+    "minY": -16,
+    "maxY": 112,
+    "tool": "stone_pickaxe"
+  },
+  "minecraft:deepslate_copper_ore": {
+    "minY": -64,
+    "maxY": 16,
+    "tool": "stone_pickaxe"
+  },
+  "minecraft:gold_ore": {
+    "minY": -64,
+    "maxY": 32,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:deepslate_gold_ore": {
+    "minY": -64,
+    "maxY": 0,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:redstone_ore": {
+    "minY": -64,
+    "maxY": 15,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:deepslate_redstone_ore": {
+    "minY": -64,
+    "maxY": 15,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:lapis_ore": {
+    "minY": -64,
+    "maxY": 64,
+    "tool": "stone_pickaxe"
+  },
+  "minecraft:deepslate_lapis_ore": {
+    "minY": -64,
+    "maxY": 0,
+    "tool": "stone_pickaxe"
+  },
+  "minecraft:emerald_ore": {
+    "minY": -16,
+    "maxY": 320,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:deepslate_emerald_ore": {
+    "minY": -64,
+    "maxY": 16,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:diamond_ore": {
+    "minY": -64,
+    "maxY": 16,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:deepslate_diamond_ore": {
+    "minY": -64,
+    "maxY": 16,
+    "tool": "iron_pickaxe"
+  },
+  "minecraft:nether_quartz_ore": {
+    "minY": 10,
+    "maxY": 117,
+    "tool": "pickaxe"
+  },
+  "minecraft:nether_gold_ore": {
+    "minY": 10,
+    "maxY": 117,
+    "tool": "pickaxe"
+  },
+  "minecraft:ancient_debris": {
+    "minY": 8,
+    "maxY": 22,
+    "tool": "diamond_pickaxe"
+  }
+}

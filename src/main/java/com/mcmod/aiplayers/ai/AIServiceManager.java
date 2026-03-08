@@ -10,6 +10,7 @@ import com.mcmod.aiplayers.entity.AgentGoal;
 import com.mcmod.aiplayers.entity.AgentSnapshot;
 import com.mcmod.aiplayers.entity.GoalType;
 import com.mcmod.aiplayers.entity.AIPlayerEntity;
+import com.mcmod.aiplayers.knowledge.KnowledgeManager;
 import com.mcmod.aiplayers.system.AIAgentPlan;
 import java.io.IOException;
 import java.net.ConnectException;
@@ -390,6 +391,9 @@ public final class AIServiceManager {
                 + "AI 名称：" + companion.getAIName() + "\n"
                 + "状态摘要：" + companion.getStatusSummary() + "\n"
                 + "观察摘要：" + companion.getObservationSummary() + "\n"
+                + "知识库摘要：" + KnowledgeManager.getStatusSummary() + "\n"
+                + "合成链提示：" + KnowledgeManager.getCraftingHintSummary() + "\n"
+                + "生物弱点提示：" + KnowledgeManager.getMobKnowledgeSummary() + "\n"
                 + "计划摘要：" + companion.getPlanSummary() + "\n"
                 + "长期记忆：" + companion.getLongTermMemorySummary();
     }
@@ -410,6 +414,8 @@ public final class AIServiceManager {
                 + "建材单位：" + summary.buildingUnits + "\n"
                 + "观察：" + summary.observation + "\n"
                 + "背包：" + summary.inventory + "\n"
+                + "合成链提示：" + KnowledgeManager.getCraftingHintSummary() + "\n"
+                + "生物弱点提示：" + KnowledgeManager.getMobKnowledgeSummary() + "\n"
                 + "最近失败：" + snapshot.memory().lastFailure() + "\n"
                 + "最近学习：" + snapshot.memory().lastLearning() + "\n"
                 + "团队知识：" + TeamSummary.safe(companion);

@@ -1,5 +1,6 @@
 package com.mcmod.aiplayers.entity;
 
+import com.mcmod.aiplayers.knowledge.KnowledgeManager;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashSet;
@@ -115,7 +116,7 @@ public final class WorldScanner {
                 for (int y = minY; y <= maxY; y++) {
                     BlockPos pos = new BlockPos(x, y, z);
                     BlockState state = level.getBlockState(pos);
-                    ResourceType type = classify(state);
+                    ResourceType type = classify(state, pos);
                     if (type != null) {
                         resources.computeIfAbsent(type, ignored -> new ArrayList<>()).add(pos.immutable());
                     }
@@ -151,14 +152,15 @@ public final class WorldScanner {
         return new ResourceNode(type, bestPos, bestDistance, type.name());
     }
 
-    private static ResourceType classify(BlockState state) {
+    private static ResourceType classify(BlockState state, BlockPos pos) {
         if (state == null || state.isAir()) {
             return null;
         }
-        if (state.is(BlockTags.LOGS)) {
+        if (KnowledgeManager.isTreeLog(state) || state.is(BlockTags.LOGS)) {
             return ResourceType.WOOD;
         }
-        if (isInterestingOre(state)) {
+        int y = pos == null ? 0 : pos.getY();
+        if (KnowledgeManager.isKnownOre(state, y) || isInterestingOre(state)) {
             return ResourceType.ORE;
         }
         if (state.getBlock() instanceof CropBlock crop && crop.isMaxAge(state)) {

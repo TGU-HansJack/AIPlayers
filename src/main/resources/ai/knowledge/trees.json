@@ -1,0 +1,73 @@
+{
+  "oak": {
+    "logs": [
+      "minecraft:oak_log"
+    ],
+    "leaves": [
+      "minecraft:oak_leaves"
+    ]
+  },
+  "birch": {
+    "logs": [
+      "minecraft:birch_log"
+    ],
+    "leaves": [
+      "minecraft:birch_leaves"
+    ]
+  },
+  "spruce": {
+    "logs": [
+      "minecraft:spruce_log"
+    ],
+    "leaves": [
+      "minecraft:spruce_leaves"
+    ]
+  },
+  "jungle": {
+    "logs": [
+      "minecraft:jungle_log"
+    ],
+    "leaves": [
+      "minecraft:jungle_leaves"
+    ]
+  },
+  "acacia": {
+    "logs": [
+      "minecraft:acacia_log"
+    ],
+    "leaves": [
+      "minecraft:acacia_leaves"
+    ]
+  },
+  "dark_oak": {
+    "logs": [
+      "minecraft:dark_oak_log"
+    ],
+    "leaves": [
+      "minecraft:dark_oak_leaves"
+    ]
+  },
+  "mangrove": {
+    "logs": [
+      "minecraft:mangrove_log"
+    ],
+    "leaves": [
+      "minecraft:mangrove_leaves"
+    ]
+  },
+  "cherry": {
+    "logs": [
+      "minecraft:cherry_log"
+    ],
+    "leaves": [
+      "minecraft:cherry_leaves"
+    ]
+  },
+  "nether_fungi": {
+    "logs": [
+      "minecraft:crimson_stem",
+      "minecraft:warped_stem"
+    ],
+    "leaves": []
+  }
+}

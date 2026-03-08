@@ -1,0 +1,93 @@
+{
+  "minecraft:oak_planks": {
+    "outputCount": 4,
+    "inputs": {
+      "minecraft:oak_log": 1
+    },
+    "category": "material"
+  },
+  "minecraft:stick": {
+    "outputCount": 4,
+    "inputs": {
+      "minecraft:oak_planks": 2
+    },
+    "category": "material"
+  },
+  "minecraft:crafting_table": {
+    "outputCount": 1,
+    "inputs": {
+      "minecraft:oak_planks": 4
+    },
+    "category": "workstation"
+  },
+  "minecraft:stone_axe": {
+    "outputCount": 1,
+    "inputs": {
+      "minecraft:cobblestone": 3,
+      "minecraft:stick": 2
+    },
+    "category": "tool",
+    "requires": [
+      "crafting_table"
+    ]
+  },
+  "minecraft:stone_pickaxe": {
+    "outputCount": 1,
+    "inputs": {
+      "minecraft:cobblestone": 3,
+      "minecraft:stick": 2
+    },
+    "category": "tool",
+    "requires": [
+      "crafting_table"
+    ]
+  },
+  "minecraft:stone_sword": {
+    "outputCount": 1,
+    "inputs": {
+      "minecraft:cobblestone": 2,
+      "minecraft:stick": 1
+    },
+    "category": "combat",
+    "requires": [
+      "crafting_table"
+    ]
+  },
+  "minecraft:torch": {
+    "outputCount": 4,
+    "inputs": {
+      "minecraft:coal": 1,
+      "minecraft:stick": 1
+    },
+    "category": "utility"
+  },
+  "minecraft:bread": {
+    "outputCount": 1,
+    "inputs": {
+      "minecraft:wheat": 3
+    },
+    "category": "food"
+  },
+  "minecraft:iron_pickaxe": {
+    "outputCount": 1,
+    "inputs": {
+      "minecraft:iron_ingot": 3,
+      "minecraft:stick": 2
+    },
+    "category": "tool",
+    "requires": [
+      "crafting_table"
+    ]
+  },
+  "minecraft:shield": {
+    "outputCount": 1,
+    "inputs": {
+      "minecraft:oak_planks": 6,
+      "minecraft:iron_ingot": 1
+    },
+    "category": "combat",
+    "requires": [
+      "crafting_table"
+    ]
+  }
+}
