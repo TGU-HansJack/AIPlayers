@@ -1,0 +1,12 @@
+{
+    "name": "andy",
+
+    "model": {
+        "api": "openai",
+        "url": "https://right.codes/codex/v1",
+        "model": "gpt-5.4-xhigh"
+    },
+
+    "embedding": false
+
+}

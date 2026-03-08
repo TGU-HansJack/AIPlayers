@@ -7,6 +7,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mcmod.aiplayers.AIPlayersMod;
+import com.mcmod.aiplayers.client.AIPlayersClient;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -68,6 +69,7 @@ public final class AIPlayersVoiceClient {
     }
 
     public static void toggleRecording(String targetName) {
+        config = loadOrCreateConfig();
         if (!config.enabled) {
             pushClientMessage("语音功能未启用，请先配置 config/aiplayers-voice.json");
             return;
@@ -80,6 +82,7 @@ public final class AIPlayersVoiceClient {
     }
 
     public static void handleSystemMessage(String message) {
+        config = loadOrCreateConfig();
         if (!config.enabled || !config.autoSpeakReplies || message == null || !message.startsWith("[")) {
             return;
         }
@@ -155,7 +158,12 @@ public final class AIPlayersVoiceClient {
                 return;
             }
             Minecraft minecraft = Minecraft.getInstance();
-            String target = targetName == null || targetName.isBlank() ? config.defaultTarget : targetName;
+            String selectedTarget = targetName == null || targetName.isBlank() ? AIPlayersClient.getSelectedAiName() : targetName;
+            String target = selectedTarget == null || selectedTarget.isBlank() ? config.defaultTarget : selectedTarget;
+            if (target == null || target.isBlank()) {
+                pushClientMessage("没有选中的 bot，请先在 H 面板中选择一个 bot。");
+                return;
+            }
             String chatLine = "@" + target + " " + transcript.trim();
             minecraft.execute(() -> {
                 if (minecraft.getConnection() != null) {
@@ -612,7 +620,7 @@ public final class AIPlayersVoiceClient {
             VoiceConfig config = new VoiceConfig();
             config.enabled = false;
             config.autoSpeakReplies = false;
-            config.defaultTarget = "ai";
+            config.defaultTarget = "";
             config.sttUrl = DEFAULT_STT_URL;
             config.sttApiKey = "";
             config.sttModel = DEFAULT_STT_MODEL;
@@ -626,8 +634,8 @@ public final class AIPlayersVoiceClient {
         }
 
         private VoiceConfig normalize() {
-            if (this.defaultTarget == null || this.defaultTarget.isBlank()) {
-                this.defaultTarget = "ai";
+            if (this.defaultTarget == null) {
+                this.defaultTarget = "";
             }
             if (this.sttUrl == null || this.sttUrl.isBlank() || LEGACY_OPENAI_STT_URL.equalsIgnoreCase(this.sttUrl)) {
                 this.sttUrl = DEFAULT_STT_URL;

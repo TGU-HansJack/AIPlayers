@@ -3,7 +3,7 @@ package com.mcmod.aiplayers.client;
 import com.mcmod.aiplayers.AIPlayersMod;
 import com.mcmod.aiplayers.client.render.AIPlayerRenderer;
 import com.mcmod.aiplayers.client.screen.AIPlayerBackpackScreen;
-import com.mcmod.aiplayers.client.screen.AIPlayersControlScreen;
+import com.mcmod.aiplayers.client.screen.MindcraftControlScreen;
 import com.mcmod.aiplayers.client.voice.AIPlayersVoiceClient;
 import com.mcmod.aiplayers.registry.ModMenus;
 import com.mcmod.aiplayers.registry.ModEntities;
@@ -23,7 +23,7 @@ public final class AIPlayersClient {
     private static final KeyMapping.Category CONTROL_CATEGORY = KeyMapping.Category.register(Identifier.fromNamespaceAndPath(AIPlayersMod.MODID, "controls"));
     private static final KeyMapping OPEN_PANEL_KEY = new KeyMapping("key.aiplayers.open_panel", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_H, CONTROL_CATEGORY);
     private static final KeyMapping VOICE_KEY = new KeyMapping("key.aiplayers.voice", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_V, CONTROL_CATEGORY);
-    private static String selectedAiName = "ai";
+    private static String selectedAiName = "";
 
     private AIPlayersClient() {
     }
@@ -66,7 +66,7 @@ public final class AIPlayersClient {
             return;
         }
         while (OPEN_PANEL_KEY.consumeClick()) {
-            minecraft.setScreen(new AIPlayersControlScreen());
+            minecraft.setScreen(new MindcraftControlScreen());
         }
         while (VOICE_KEY.consumeClick()) {
             AIPlayersVoiceClient.toggleRecording(selectedAiName);

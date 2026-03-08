@@ -1,8 +1,8 @@
 package com.mcmod.aiplayers.system;
 
-import com.mcmod.aiplayers.entity.AIPlayerEntity;
-import java.util.Comparator;
-import java.util.List;
+import com.mcmod.aiplayers.mindcraft.MindcraftIntegrationService;
+import com.mcmod.aiplayers.mindcraft.MindcraftSessionSavedData;
+import java.io.IOException;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.event.ServerChatEvent;
@@ -19,36 +19,21 @@ public final class AIPlayersChatHandler {
 
         ServerPlayer player = event.getPlayer();
         int firstSpace = raw.indexOf(' ');
-        String targetToken = firstSpace >= 0 ? raw.substring(1, firstSpace) : raw.substring(1);
+        String botName = firstSpace >= 0 ? raw.substring(1, firstSpace) : raw.substring(1);
         String content = firstSpace >= 0 ? raw.substring(firstSpace + 1).trim() : "";
-
-        AIPlayerEntity companion = findTargetCompanion(player, targetToken);
-        if (companion == null) {
+        MindcraftSessionSavedData.MindcraftBotSession session = MindcraftIntegrationService.findOwnedSession(player, botName);
+        if (session == null) {
             return;
         }
-
-        String response = companion.executeConversation(player, content);
-        player.sendSystemMessage(Component.literal("[" + companion.getAIName() + "] " + response));
-    }
-
-    private static AIPlayerEntity findTargetCompanion(ServerPlayer player, String targetToken) {
-        List<AIPlayerEntity> nearby = player.level()
-                .getEntitiesOfClass(AIPlayerEntity.class, player.getBoundingBox().inflate(64.0D))
-                .stream()
-                .sorted(Comparator.comparingDouble(entity -> player.distanceToSqr(entity)))
-                .toList();
-
-        if (nearby.isEmpty()) {
-            return null;
+        if (content.isBlank()) {
+            player.sendSystemMessage(Component.literal("[" + botName + "] 请输入要发送的内容。"));
+            return;
         }
-
-        if (targetToken.equalsIgnoreCase("ai") || targetToken.equalsIgnoreCase("bot")) {
-            return nearby.stream().filter(entity -> entity.canReceiveOrdersFrom(player)).findFirst().orElse(nearby.getFirst());
+        try {
+            MindcraftIntegrationService.sendMessage(player, botName, content);
+            player.sendSystemMessage(Component.literal("[" + botName + "] 已收到。"));
+        } catch (IOException | InterruptedException ex) {
+            player.sendSystemMessage(Component.literal("[" + botName + "] 转发失败：" + ex.getMessage()));
         }
-
-        return nearby.stream()
-                .filter(entity -> entity.getAIName().equalsIgnoreCase(targetToken))
-                .findFirst()
-                .orElse(null);
     }
 }

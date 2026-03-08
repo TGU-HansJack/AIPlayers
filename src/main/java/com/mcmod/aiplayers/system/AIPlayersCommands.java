@@ -1,43 +1,23 @@
 package com.mcmod.aiplayers.system;
 
-import com.mcmod.aiplayers.ai.AIServiceManager;
-import com.mcmod.aiplayers.entity.AIPlayerAction;
-import com.mcmod.aiplayers.entity.AIControllerHub;
-import com.mcmod.aiplayers.entity.AgentConfigManager;
-import com.mcmod.aiplayers.entity.AIPlayerEntity;
-import com.mcmod.aiplayers.entity.AIPlayerMode;
-import com.mcmod.aiplayers.entity.AnimalTargetHelper;
-import com.mcmod.aiplayers.knowledge.KnowledgeManager;
-import com.mcmod.aiplayers.system.BlueprintRegistry;
-import com.mcmod.aiplayers.registry.ModEntities;
+import com.mcmod.aiplayers.mindcraft.MindcraftBotInfo;
+import com.mcmod.aiplayers.mindcraft.MindcraftIntegrationService;
+import com.mcmod.aiplayers.mindcraft.MindcraftSessionSavedData;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
-import com.mojang.brigadier.suggestion.Suggestions;
-import com.mojang.brigadier.suggestion.SuggestionsBuilder;
-import java.util.Collection;
-import java.util.LinkedHashMap;
+import java.io.IOException;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
-import net.minecraft.commands.SharedSuggestionProvider;
-import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraftforge.event.RegisterCommandsEvent;
 
 public final class AIPlayersCommands {
-    private static final SimpleCommandExceptionType NOT_AN_AI_PLAYER = new SimpleCommandExceptionType(Component.literal("目标不是 AI Players 实体。"));
-    private static final SimpleCommandExceptionType INVALID_MODE = new SimpleCommandExceptionType(Component.literal("未知模式。可用模式：idle, follow, guard, gather_wood, mine, explore, build_shelter, survive"));
-    private static final SimpleCommandExceptionType INVALID_ACTION = new SimpleCommandExceptionType(Component.literal("未知动作。可用动作：jump, crouch, stand, look_up, look_down, look_owner, recover"));
-    private static final SimpleCommandExceptionType INVALID_HUNT_TARGET = new SimpleCommandExceptionType(Component.literal("无法识别目标动物。请使用原版生物名称，例如 cow、pig、sheep。"));
-    private static final SimpleCommandExceptionType NO_OWNED_AI_PLAYER = new SimpleCommandExceptionType(Component.literal("附近未找到可控制的 AI 玩家。"));
+    private static final SimpleCommandExceptionType PLAYER_ONLY = new SimpleCommandExceptionType(Component.literal("该命令只能由玩家执行。"));
 
     private AIPlayersCommands() {
     }
@@ -47,370 +27,154 @@ public final class AIPlayersCommands {
         dispatcher.register(Commands.literal("aiplayers")
                 .then(Commands.literal("spawn")
                         .then(Commands.argument("name", StringArgumentType.word())
-                                .executes(context -> spawn(context, StringArgumentType.getString(context, "name")))))
-                .then(Commands.literal("mode")
-                        .then(Commands.argument("targets", EntityArgument.entities())
-                                .then(Commands.argument("mode", StringArgumentType.word())
-                                        .suggests(AIPlayersCommands::suggestModes)
-                                        .executes(AIPlayersCommands::setMode))))
-                .then(Commands.literal("action")
-                        .then(Commands.argument("targets", EntityArgument.entities())
-                                .then(Commands.argument("action", StringArgumentType.word())
-                                        .suggests(AIPlayersCommands::suggestActions)
-                                        .executes(AIPlayersCommands::performAction))))
-                .then(Commands.literal("hunt")
-                        .then(Commands.argument("targets", EntityArgument.entities())
-                                .then(Commands.argument("animal", StringArgumentType.greedyString())
-                                        .suggests(AIPlayersCommands::suggestHuntTargets)
-                                        .executes(AIPlayersCommands::huntTargets))))
-                .then(Commands.literal("controller")
-                        .then(Commands.argument("controller", StringArgumentType.word())
-                                .then(Commands.argument("action", StringArgumentType.word())
-                                        .executes(AIPlayersCommands::controllerNearestOwned)
-                                        .then(Commands.argument("args", StringArgumentType.greedyString())
-                                                .executes(AIPlayersCommands::controllerNearestOwned)))))
+                                .executes(AIPlayersCommands::spawn)))
+                .then(Commands.literal("list")
+                        .executes(AIPlayersCommands::list))
                 .then(Commands.literal("status")
-                        .then(Commands.argument("target", EntityArgument.entity())
+                        .executes(AIPlayersCommands::list)
+                        .then(Commands.argument("name", StringArgumentType.word())
                                 .executes(AIPlayersCommands::status)))
-                .then(Commands.literal("inventory")
-                        .then(Commands.argument("target", EntityArgument.entity())
-                                .executes(AIPlayersCommands::inventory)))
-                .then(Commands.literal("memory")
-                        .then(Commands.argument("target", EntityArgument.entity())
-                                .executes(AIPlayersCommands::memory)))
-                .then(Commands.literal("plan")
-                        .then(Commands.argument("target", EntityArgument.entity())
-                                .executes(AIPlayersCommands::plan)))
-                .then(Commands.literal("blueprint")
-                        .then(Commands.argument("target", EntityArgument.entity())
-                                .then(Commands.argument("blueprint", StringArgumentType.word())
-                                        .suggests(AIPlayersCommands::suggestBlueprints)
-                                        .executes(AIPlayersCommands::blueprint))))
-                .then(Commands.literal("api")
-                        .then(Commands.literal("status").executes(AIPlayersCommands::apiStatus))
-                        .then(Commands.literal("reload").executes(AIPlayersCommands::apiReload))
-                        .then(Commands.literal("enable").executes(AIPlayersCommands::apiEnable))
-                        .then(Commands.literal("disable").executes(AIPlayersCommands::apiDisable)))
-                .then(Commands.literal("dbg")
-                        .then(Commands.literal("status").executes(AIPlayersCommands::dbgStatus))
-                        .then(Commands.literal("on").executes(AIPlayersCommands::dbgOn))
-                        .then(Commands.literal("off").executes(AIPlayersCommands::dbgOff)))
-                .then(Commands.literal("knowledge")
-                        .then(Commands.literal("reload").executes(AIPlayersCommands::knowledgeReload))
-                        .then(Commands.literal("status").executes(AIPlayersCommands::knowledgeStatus))));
-        dispatcher.register(Commands.literal("ai")
-                .then(Commands.literal("hunt")
-                        .then(Commands.argument("animal", StringArgumentType.greedyString())
-                                .suggests(AIPlayersCommands::suggestHuntTargets)
-                                .executes(AIPlayersCommands::huntNearestOwned))));
+                .then(Commands.literal("send")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .then(Commands.argument("message", StringArgumentType.greedyString())
+                                        .executes(AIPlayersCommands::send))))
+                .then(Commands.literal("stop")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .executes(AIPlayersCommands::stop)))
+                .then(Commands.literal("remove")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .executes(AIPlayersCommands::remove)))
+                .then(Commands.literal("panel")
+                        .executes(AIPlayersCommands::panel))
+                .then(Commands.literal("voice")
+                        .then(Commands.literal("status").executes(AIPlayersCommands::voiceStatus))
+                        .then(Commands.literal("reload").executes(AIPlayersCommands::voiceReload))
+                        .then(Commands.literal("test").executes(AIPlayersCommands::voiceTest))));
     }
 
-    private static int spawn(CommandContext<CommandSourceStack> context, String name) throws CommandSyntaxException {
+    private static int spawn(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
         ServerPlayer player = context.getSource().getPlayerOrException();
-        AIPlayerEntity companion = ModEntities.AI_PLAYER.get().create(player.level(), EntitySpawnReason.COMMAND);
-        if (companion == null) {
-            throw new SimpleCommandExceptionType(Component.literal("AI 玩家实体创建失败。")).create();
-        }
-
-        companion.snapTo(player.getX() + 1.0D, player.getY(), player.getZ() + 1.0D, player.getYRot(), 0.0F);
-        companion.initializeCompanion(player, name);
-        player.level().addFreshEntity(companion);
-
-        context.getSource().sendSuccess(() -> Component.literal("已生成 AI 玩家：" + name), true);
-        return 1;
-    }
-
-    private static int setMode(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
-        AIPlayerMode mode = AIPlayerMode.fromCommand(StringArgumentType.getString(context, "mode"));
-        if (mode == null) {
-            throw INVALID_MODE.create();
-        }
-
-        List<AIPlayerEntity> companions = resolveCompanions(context, "targets");
-        ServerPlayer commander = context.getSource().getEntity() instanceof ServerPlayer player ? player : null;
-        int updated = 0;
-        for (AIPlayerEntity companion : companions) {
-            if (commander != null && !companion.canReceiveOrdersFrom(commander)) {
-                continue;
-            }
-            companion.applyCommandedMode(commander, mode);
-            updated++;
-        }
-
-        int updatedCount = updated;
-        context.getSource().sendSuccess(() -> Component.literal("已切换 " + updatedCount + " 个 AI 玩家到模式：" + mode.displayName()), true);
-        return updated;
-    }
-
-    private static int performAction(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
-        AIPlayerAction action = AIPlayerAction.fromCommand(StringArgumentType.getString(context, "action"));
-        if (action == null) {
-            throw INVALID_ACTION.create();
-        }
-
-        List<AIPlayerEntity> companions = resolveCompanions(context, "targets");
-        ServerPlayer commander = context.getSource().getEntity() instanceof ServerPlayer player ? player : null;
-        int updated = 0;
-        for (AIPlayerEntity companion : companions) {
-            if (commander != null && !companion.canReceiveOrdersFrom(commander)) {
-                continue;
-            }
-            companion.performAction(action);
-            updated++;
-        }
-
-        int updatedCount = updated;
-        context.getSource().sendSuccess(() -> Component.literal("已让 " + updatedCount + " 个 AI 玩家执行动作：" + action.displayName()), true);
-        return updated;
-    }
-
-    private static int huntTargets(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
-        AnimalTargetHelper.HuntTarget huntTarget = AnimalTargetHelper.resolveHuntTarget(StringArgumentType.getString(context, "animal"));
-        if (huntTarget == null) {
-            throw INVALID_HUNT_TARGET.create();
-        }
-        List<AIPlayerEntity> companions = resolveCompanions(context, "targets");
-        ServerPlayer commander = context.getSource().getEntity() instanceof ServerPlayer player ? player : null;
-        int updated = 0;
-        for (AIPlayerEntity companion : companions) {
-            if (commander != null && !companion.canReceiveOrdersFrom(commander)) {
-                continue;
-            }
-            companion.startAnimalHunt(commander, huntTarget.targetId(), huntTarget.label());
-            updated++;
-        }
-        int updatedCount = updated;
-        context.getSource().sendSuccess(() -> Component.literal("已下达狩猎指令：攻击" + huntTarget.label() + "（" + updatedCount + " 个 AI）"), true);
-        return updated;
-    }
-
-    private static int huntNearestOwned(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
-        ServerPlayer commander = context.getSource().getPlayerOrException();
-        AnimalTargetHelper.HuntTarget huntTarget = AnimalTargetHelper.resolveHuntTarget(StringArgumentType.getString(context, "animal"));
-        if (huntTarget == null) {
-            throw INVALID_HUNT_TARGET.create();
-        }
-        AIPlayerEntity nearest = commander.level()
-                .getEntitiesOfClass(AIPlayerEntity.class, commander.getBoundingBox().inflate(64.0D), companion -> companion.canReceiveOrdersFrom(commander))
-                .stream()
-                .min((left, right) -> Double.compare(commander.distanceToSqr(left), commander.distanceToSqr(right)))
-                .orElse(null);
-        if (nearest == null) {
-            throw NO_OWNED_AI_PLAYER.create();
-        }
-
-        nearest.startAnimalHunt(commander, huntTarget.targetId(), huntTarget.label());
-        context.getSource().sendSuccess(() -> Component.literal("已命令 " + nearest.getAIName() + " 狩猎：" + huntTarget.label()), false);
-        return 1;
-    }
-
-    private static int controllerNearestOwned(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
-        ServerPlayer commander = context.getSource().getPlayerOrException();
-        String controller = StringArgumentType.getString(context, "controller");
-        String action = StringArgumentType.getString(context, "action");
-        String rawArgs = readOptionalStringArg(context, "args");
-        Map<String, String> parsedArgs = parseControllerArgs(rawArgs);
-
-        AIPlayerEntity nearest = commander.level()
-                .getEntitiesOfClass(AIPlayerEntity.class, commander.getBoundingBox().inflate(96.0D), companion -> companion.canReceiveOrdersFrom(commander))
-                .stream()
-                .min((left, right) -> Double.compare(commander.distanceToSqr(left), commander.distanceToSqr(right)))
-                .orElse(null);
-        if (nearest == null) {
-            throw NO_OWNED_AI_PLAYER.create();
-        }
-
-        AIControllerHub.ControllerExecutionResult result = nearest.executeControllerDirective(commander, controller, action, parsedArgs);
-        if (result.success()) {
-            context.getSource().sendSuccess(
-                    () -> Component.literal("控制器执行成功：" + nearest.getAIName() + " -> " + result.message()),
-                    false);
+        String name = StringArgumentType.getString(context, "name");
+        try {
+            MindcraftBotInfo created = MindcraftIntegrationService.spawnBot(player, name);
+            context.getSource().sendSuccess(() -> Component.literal("已创建真实玩家 bot：" + created.compactSummary()), true);
             return 1;
+        } catch (IOException | InterruptedException ex) {
+            context.getSource().sendFailure(Component.literal("创建 bot 失败：" + ex.getMessage()));
+            return 0;
         }
-        context.getSource().sendFailure(Component.literal("控制器执行失败：" + nearest.getAIName() + " -> " + result.message()));
-        return 0;
     }
 
-    private static int status(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
-        AIPlayerEntity companion = resolveCompanion(context, "target");
-        context.getSource().sendSuccess(() -> Component.literal(companion.getStatusSummary()), false);
-        return 1;
-    }
-
-    private static int inventory(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
-        AIPlayerEntity companion = resolveCompanion(context, "target");
-        context.getSource().sendSuccess(() -> Component.literal("背包内容：" + companion.getDetailedInventorySummary()), false);
-        return 1;
-    }
-
-    private static int memory(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
-        AIPlayerEntity companion = resolveCompanion(context, "target");
-        context.getSource().sendSuccess(() -> Component.literal(companion.getMemorySummary()), false);
-        return 1;
-    }
-
-    private static int plan(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
-        AIPlayerEntity companion = resolveCompanion(context, "target");
-        context.getSource().sendSuccess(() -> Component.literal("当前规划：" + companion.getPlanSummary()), false);
-        return 1;
-    }
-
-    private static int blueprint(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
-        AIPlayerEntity companion = resolveCompanion(context, "target");
-        String blueprintId = StringArgumentType.getString(context, "blueprint");
-        companion.selectBlueprint(blueprintId);
-        context.getSource().sendSuccess(() -> Component.literal("已将 " + companion.getAIName() + " 的蓝图切换为：" + BlueprintRegistry.get(companion.getActiveBlueprintId()).displayName()), false);
-        return 1;
-    }
-
-    private static int apiStatus(CommandContext<CommandSourceStack> context) {
-        context.getSource().sendSuccess(() -> Component.literal(AIServiceManager.getStatusSummary()), false);
-        return 1;
-    }
-
-    private static int apiReload(CommandContext<CommandSourceStack> context) {
-        AIServiceManager.reload();
-        context.getSource().sendSuccess(() -> Component.literal("已重新加载 AI 接口配置。"), false);
-        context.getSource().sendSuccess(() -> Component.literal(AIServiceManager.getStatusSummary()), false);
-        return 1;
-    }
-
-    private static int apiEnable(CommandContext<CommandSourceStack> context) {
-        AIServiceManager.setEnabled(true);
-        context.getSource().sendSuccess(() -> Component.literal("已启用 AI 接口。"), false);
-        context.getSource().sendSuccess(() -> Component.literal(AIServiceManager.getStatusSummary()), false);
-        return 1;
-    }
-
-    private static int apiDisable(CommandContext<CommandSourceStack> context) {
-        AIServiceManager.setEnabled(false);
-        context.getSource().sendSuccess(() -> Component.literal("已关闭 AI 接口。"), false);
-        context.getSource().sendSuccess(() -> Component.literal(AIServiceManager.getStatusSummary()), false);
-        return 1;
-    }
-
-    private static int dbgStatus(CommandContext<CommandSourceStack> context) {
-        boolean enabled = AgentConfigManager.getConfig().debugLogsEnabled();
-        context.getSource().sendSuccess(() -> Component.literal("DBG 日志：" + (enabled ? "已开启" : "已关闭")), false);
-        return 1;
-    }
-
-    private static int dbgOn(CommandContext<CommandSourceStack> context) {
-        AgentConfigManager.setDebugLogsEnabled(true);
-        context.getSource().sendSuccess(() -> Component.literal("已开启 DBG 日志（AI-DBG 与服务端 debug 输出）。"), false);
-        return 1;
-    }
-
-    private static int dbgOff(CommandContext<CommandSourceStack> context) {
-        AgentConfigManager.setDebugLogsEnabled(false);
-        context.getSource().sendSuccess(() -> Component.literal("已关闭 DBG 日志。"), false);
-        return 1;
-    }
-
-    private static int knowledgeReload(CommandContext<CommandSourceStack> context) {
-        KnowledgeManager.reload();
-        context.getSource().sendSuccess(() -> Component.literal("已热更新知识库。"), false);
-        context.getSource().sendSuccess(() -> Component.literal("知识库状态：" + KnowledgeManager.getStatusSummary()), false);
-        return 1;
-    }
-
-    private static int knowledgeStatus(CommandContext<CommandSourceStack> context) {
-        context.getSource().sendSuccess(() -> Component.literal("知识库状态：" + KnowledgeManager.getStatusSummary()), false);
-        return 1;
-    }
-
-    private static String readOptionalStringArg(CommandContext<CommandSourceStack> context, String argName) {
+    private static int list(CommandContext<CommandSourceStack> context) {
         try {
-            return StringArgumentType.getString(context, argName);
-        } catch (IllegalArgumentException ignored) {
-            return "";
+            List<MindcraftBotInfo> bots = MindcraftIntegrationService.listLiveBots(context.getSource().getServer());
+            if (bots.isEmpty()) {
+                context.getSource().sendSuccess(() -> Component.literal("当前没有在线或已注册的 bot。"), false);
+                return 1;
+            }
+            for (MindcraftBotInfo bot : bots) {
+                context.getSource().sendSuccess(() -> Component.literal(bot.compactSummary()), false);
+            }
+            return bots.size();
+        } catch (IOException | InterruptedException ex) {
+            int shown = 0;
+            for (MindcraftSessionSavedData.MindcraftBotSession session : MindcraftIntegrationService.listStoredSessions(context.getSource().getServer())) {
+                shown++;
+                context.getSource().sendSuccess(() -> Component.literal(session.name() + " | " + session.status() + " | 主人=" + session.ownerName()), false);
+            }
+            if (shown == 0) {
+                context.getSource().sendFailure(Component.literal("无法连接本地面板：" + ex.getMessage()));
+                return 0;
+            }
+            context.getSource().sendSuccess(() -> Component.literal("本地面板不可达，以下为本地缓存会话："), false);
+            return shown;
         }
     }
 
-    private static Map<String, String> parseControllerArgs(String rawArgs) {
-        if (rawArgs == null || rawArgs.isBlank()) {
-            return Map.of();
-        }
-        String normalized = rawArgs.trim().replace('，', ',').replace('；', ',').replace(';', ',');
-        Map<String, String> args = new LinkedHashMap<>();
-        if (normalized.contains("=")) {
-            String[] tokens = normalized.split("[,\\s]+");
-            for (String token : tokens) {
-                if (token == null || token.isBlank()) {
-                    continue;
-                }
-                int split = token.indexOf('=');
-                if (split <= 0 || split >= token.length() - 1) {
-                    continue;
-                }
-                String key = token.substring(0, split).trim();
-                String value = token.substring(split + 1).trim();
-                if (!key.isBlank() && !value.isBlank()) {
-                    args.put(key, value);
-                }
-            }
-            return args.isEmpty() ? Map.of() : Map.copyOf(args);
-        }
-        String compact = normalized.replace(" ", ",");
-        String[] pos = compact.split(",");
-        if (pos.length >= 3) {
-            Integer x = parseInteger(pos[0]);
-            Integer y = parseInteger(pos[1]);
-            Integer z = parseInteger(pos[2]);
-            if (x != null && y != null && z != null) {
-                args.put("x", Integer.toString(x));
-                args.put("y", Integer.toString(y));
-                args.put("z", Integer.toString(z));
-            }
-        }
-        return args.isEmpty() ? Map.of() : Map.copyOf(args);
-    }
-
-    private static Integer parseInteger(String value) {
-        if (value == null || value.isBlank()) {
-            return null;
-        }
+    private static int status(CommandContext<CommandSourceStack> context) {
+        String name = StringArgumentType.getString(context, "name");
         try {
-            return Integer.parseInt(value.trim());
-        } catch (NumberFormatException ignored) {
-            return null;
+            MindcraftBotInfo info = MindcraftIntegrationService.getBotStatus(context.getSource().getServer(), name);
+            if (info == null) {
+                context.getSource().sendFailure(Component.literal("未找到 bot：" + name));
+                return 0;
+            }
+            context.getSource().sendSuccess(() -> Component.literal(info.compactSummary()), false);
+            context.getSource().sendSuccess(() -> Component.literal(info.gameplaySummary()), false);
+            context.getSource().sendSuccess(() -> Component.literal("动作：" + info.actionSummary()), false);
+            context.getSource().sendSuccess(() -> Component.literal("最近回复：" + info.lastMessage()), false);
+            return 1;
+        } catch (IOException | InterruptedException ex) {
+            context.getSource().sendFailure(Component.literal("查询状态失败：" + ex.getMessage()));
+            return 0;
         }
     }
 
-    private static AIPlayerEntity resolveCompanion(CommandContext<CommandSourceStack> context, String name) throws CommandSyntaxException {
-        Entity entity = EntityArgument.getEntity(context, name);
-        if (!(entity instanceof AIPlayerEntity companion)) {
-            throw NOT_AN_AI_PLAYER.create();
+    private static int send(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        ServerPlayer player = requirePlayer(context);
+        String name = StringArgumentType.getString(context, "name");
+        String message = StringArgumentType.getString(context, "message");
+        try {
+            MindcraftIntegrationService.sendMessage(player, name, message);
+            context.getSource().sendSuccess(() -> Component.literal("已发送到 " + name + "：" + message), false);
+            return 1;
+        } catch (IOException | InterruptedException ex) {
+            context.getSource().sendFailure(Component.literal("发送失败：" + ex.getMessage()));
+            return 0;
         }
-        return companion;
     }
 
-    private static List<AIPlayerEntity> resolveCompanions(CommandContext<CommandSourceStack> context, String name) throws CommandSyntaxException {
-        Collection<? extends Entity> entities = EntityArgument.getEntities(context, name);
-        List<AIPlayerEntity> companions = entities.stream()
-                .filter(AIPlayerEntity.class::isInstance)
-                .map(AIPlayerEntity.class::cast)
-                .toList();
-
-        if (companions.isEmpty()) {
-            throw NOT_AN_AI_PLAYER.create();
+    private static int stop(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        ServerPlayer player = requirePlayer(context);
+        String name = StringArgumentType.getString(context, "name");
+        try {
+            MindcraftIntegrationService.stopBot(player, name);
+            context.getSource().sendSuccess(() -> Component.literal("已停止 bot：" + name), true);
+            return 1;
+        } catch (IOException | InterruptedException ex) {
+            context.getSource().sendFailure(Component.literal("停止失败：" + ex.getMessage()));
+            return 0;
         }
-        return companions;
     }
 
-    private static CompletableFuture<Suggestions> suggestModes(CommandContext<CommandSourceStack> context, SuggestionsBuilder builder) {
-        return SharedSuggestionProvider.suggest(AIPlayerMode.commandNames(), builder);
+    private static int remove(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        ServerPlayer player = requirePlayer(context);
+        String name = StringArgumentType.getString(context, "name");
+        try {
+            MindcraftIntegrationService.removeBot(player, name);
+            context.getSource().sendSuccess(() -> Component.literal("已删除 bot：" + name), true);
+            return 1;
+        } catch (IOException | InterruptedException ex) {
+            context.getSource().sendFailure(Component.literal("删除失败：" + ex.getMessage()));
+            return 0;
+        }
     }
 
-    private static CompletableFuture<Suggestions> suggestActions(CommandContext<CommandSourceStack> context, SuggestionsBuilder builder) {
-        return SharedSuggestionProvider.suggest(AIPlayerAction.commandNames(), builder);
+    private static int panel(CommandContext<CommandSourceStack> context) {
+        context.getSource().sendSuccess(() -> Component.literal("本地控制面板：" + MindcraftIntegrationService.panelUrl()), false);
+        return 1;
     }
 
-    private static CompletableFuture<Suggestions> suggestBlueprints(CommandContext<CommandSourceStack> context, SuggestionsBuilder builder) {
-        return SharedSuggestionProvider.suggest(BlueprintRegistry.ids(), builder);
+    private static int voiceStatus(CommandContext<CommandSourceStack> context) {
+        context.getSource().sendSuccess(() -> Component.literal(VoiceCommandSupport.statusSummary()), false);
+        return 1;
     }
 
-    private static CompletableFuture<Suggestions> suggestHuntTargets(CommandContext<CommandSourceStack> context, SuggestionsBuilder builder) {
-        return SharedSuggestionProvider.suggest(AnimalTargetHelper.huntCommandSuggestions(), builder);
+    private static int voiceReload(CommandContext<CommandSourceStack> context) {
+        context.getSource().sendSuccess(() -> Component.literal(VoiceCommandSupport.reloadAndDescribe()), false);
+        return 1;
+    }
+
+    private static int voiceTest(CommandContext<CommandSourceStack> context) {
+        context.getSource().sendSuccess(() -> Component.literal(VoiceCommandSupport.testTts()), false);
+        return 1;
+    }
+
+    private static ServerPlayer requirePlayer(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        ServerPlayer player = context.getSource().getPlayer();
+        if (player == null) {
+            throw PLAYER_ONLY.create();
+        }
+        return player;
     }
 }
