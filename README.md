@@ -549,6 +549,16 @@ config/aiplayers-voice.json
 .\gradlew.bat runClient
 ```
 
+### 修改后强制打包约定
+
+每次代码修改（无论是功能、修复还是重构）后，必须执行一次完整打包并确认 `build/libs` 产物已更新：
+
+```powershell
+.\gradlew.bat build
+```
+
+默认以最新时间戳的 `build/libs/aiplayers-*.jar` 作为可交付版本。
+
 ### 重新加载 AI 配置
 
 ```mcfunction

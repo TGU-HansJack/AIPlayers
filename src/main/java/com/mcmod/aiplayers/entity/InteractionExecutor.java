@@ -122,9 +122,12 @@ public final class InteractionExecutor {
             entity.runtimeLookAt(Vec3.atCenterOf(target), 10);
             return ActionExecutionResult.RUNNING;
         }
-        return entity.runtimeBreakPathBlock(target, action.woodTask())
-                ? ActionExecutionResult.SUCCESS
-                : ActionExecutionResult.FAILED;
+        if (entity.runtimeBreakPathBlock(target, action.woodTask())) {
+            return ActionExecutionResult.SUCCESS;
+        }
+        return entity.runtimeHasBreakablePathBlock(target, action.woodTask())
+                ? ActionExecutionResult.RUNNING
+                : ActionExecutionResult.SUCCESS;
     }
 
     private static ActionExecutionResult executeBreakTarget(AIPlayerEntity entity, InteractionAction action) {
@@ -151,9 +154,12 @@ public final class InteractionExecutor {
             entity.runtimeLookAt(Vec3.atCenterOf(focus), 10);
             return ActionExecutionResult.RUNNING;
         }
-        return entity.runtimeHarvestTarget(target, action.woodTask())
-                ? ActionExecutionResult.SUCCESS
-                : ActionExecutionResult.FAILED;
+        if (entity.runtimeHarvestTarget(target, action.woodTask())) {
+            return ActionExecutionResult.SUCCESS;
+        }
+        return entity.runtimeIsValidHarvestTarget(target, action.woodTask())
+                ? ActionExecutionResult.RUNNING
+                : ActionExecutionResult.SUCCESS;
     }
 
     private static ActionExecutionResult executePlaceBlock(AIPlayerEntity entity, InteractionAction action) {

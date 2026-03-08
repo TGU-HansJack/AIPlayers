@@ -109,7 +109,7 @@ public class AIPlayerEntity extends Zombie {
     private static final int TELEMETRY_SYNC_INTERVAL = 10;
     private static final int MEMORY_LIMIT = 12;
     private static final int NAVIGATION_STUCK_THRESHOLD = 60;
-    private static final double HARVEST_REACH = 4.75D;
+    private static final double HARVEST_REACH = 4.5D;
     private static final double RECOVERY_REACH = 3.5D;
     private static final double FAST_FOLLOW_SPEED = 1.35D;
     private static final double NORMAL_FOLLOW_SPEED = 1.15D;
@@ -189,6 +189,12 @@ public class AIPlayerEntity extends Zombie {
     private boolean pendingWasdJump;
     private boolean pendingWasdJumpQueued;
     private boolean wasdOverrideActive;
+    private BlockPos miningTarget;
+    private MiningMode miningMode = MiningMode.NONE;
+    private int miningProgressTicks;
+    private int miningRequiredTicks;
+    private int miningLastTick;
+    private String miningObservationPrefix = "";
 
     public AIPlayerEntity(EntityType<? extends Zombie> entityType, Level level) {
         super(entityType, level);
@@ -282,6 +288,7 @@ public class AIPlayerEntity extends Zombie {
 
         this.ensurePersistentStateLoaded();
         this.tickActionState();
+        this.tickMiningState();
         this.agentRuntime.tickMovement();
 
         if (AITickScheduler.shouldRunWorldScan(this.tickCount)) {
@@ -2420,20 +2427,76 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private boolean breakAuxiliaryBlock(BlockPos pos, String observationPrefix) {
+        return this.mineBlockTick(pos, MiningMode.AUXILIARY, observationPrefix);
+    }
+
+    private void tickMiningState() {
+        if (this.miningMode == MiningMode.NONE) {
+            return;
+        }
+        if (this.miningTarget == null || this.tickCount - this.miningLastTick > 20) {
+            this.resetMiningState();
+        }
+    }
+
+    private void resetMiningState() {
+        this.miningTarget = null;
+        this.miningMode = MiningMode.NONE;
+        this.miningProgressTicks = 0;
+        this.miningRequiredTicks = 0;
+        this.miningLastTick = 0;
+        this.miningObservationPrefix = "";
+    }
+
+    private boolean mineBlockTick(BlockPos pos, MiningMode mode, String observationPrefix) {
+        if (pos == null || mode == MiningMode.NONE) {
+            return false;
+        }
         if (!(this.level() instanceof ServerLevel serverLevel)) {
             return false;
         }
         if (!serverLevel.getGameRules().get(GameRules.MOB_GRIEFING)) {
+            this.lastObservation = "服务器关闭了生物破坏方块，无法执行采集任务。";
             return false;
         }
-
         BlockState state = serverLevel.getBlockState(pos);
-        if (state.isAir() || state.getDestroySpeed(serverLevel, pos) < 0.0F) {
+        if (state.isAir()) {
+            if (pos.equals(this.miningTarget)) {
+                this.resetMiningState();
+            }
+            return true;
+        }
+        if (state.getDestroySpeed(serverLevel, pos) < 0.0F) {
             return false;
         }
 
-        this.facePosition(Vec3.atCenterOf(pos));
+        Vec3 center = Vec3.atCenterOf(pos);
+        if (this.distanceToSqr(center) > HARVEST_REACH * HARVEST_REACH || !this.canHarvestFromHere(pos)) {
+            return false;
+        }
+
+        if (!pos.equals(this.miningTarget) || this.miningMode != mode) {
+            this.miningTarget = pos.immutable();
+            this.miningMode = mode;
+            this.miningObservationPrefix = observationPrefix == null ? "" : observationPrefix;
+            this.miningProgressTicks = 0;
+            this.miningRequiredTicks = this.computeMiningRequiredTicks(state, pos);
+        }
+
+        if (this.tickCount == this.miningLastTick) {
+            return false;
+        }
+        this.miningLastTick = this.tickCount;
+        this.miningProgressTicks++;
+
+        this.facePosition(center);
         this.swing(InteractionHand.MAIN_HAND);
+
+        if (this.miningProgressTicks < this.miningRequiredTicks) {
+            this.lastObservation = "采掘中 " + this.miningProgressTicks + "/" + this.miningRequiredTicks + " @" + this.formatPos(pos);
+            return false;
+        }
+
         BlockEntity blockEntity = serverLevel.getBlockEntity(pos);
         ItemStack tool = this.getMainHandItem().copy();
         List<ItemStack> drops = Block.getDrops(state, serverLevel, pos, blockEntity, this, tool);
@@ -2448,9 +2511,31 @@ public class AIPlayerEntity extends Zombie {
             }
         }
 
-        this.lastObservation = observationPrefix + this.formatPos(pos);
-        this.remember("路径", this.lastObservation);
+        if (this.miningMode == MiningMode.HARVEST_WOOD || this.miningMode == MiningMode.HARVEST_ORE) {
+            TeamKnowledge.forgetResourceNear(this, this.miningMode == MiningMode.HARVEST_WOOD ? ResourceType.WOOD : ResourceType.ORE, pos, 9.0D);
+            this.lastObservation = this.miningObservationPrefix + this.formatPos(pos);
+            this.remember("资源", this.lastObservation);
+            this.reportTaskProgress(this.activeTaskName, this.miningMode == MiningMode.HARVEST_WOOD
+                    ? "已采集木头：" + this.formatPos(pos)
+                    : "已采集矿石：" + this.formatPos(pos));
+        } else {
+            this.lastObservation = this.miningObservationPrefix + this.formatPos(pos);
+            this.remember("路径", this.lastObservation);
+        }
+        this.resetMiningState();
         return true;
+    }
+
+    private int computeMiningRequiredTicks(BlockState state, BlockPos pos) {
+        float hardness = state.getDestroySpeed(this.level(), pos);
+        if (hardness < 0.0F) {
+            return Integer.MAX_VALUE;
+        }
+        int base = Mth.ceil((hardness + 0.3F) * 10.0F);
+        if (this.getMainHandItem().isCorrectToolForDrops(state)) {
+            base = Math.max(4, (int) Math.floor(base * 0.65D));
+        }
+        return Mth.clamp(base, 4, 80);
     }
 
     private boolean tryCraftBread() {
@@ -2881,7 +2966,13 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private boolean canHarvestFromHere(BlockPos target) {
-        Vec3 eyes = this.getEyePosition();
+        return this.canHarvestFromPosition(this.getEyePosition(), target);
+    }
+
+    private boolean canHarvestFromPosition(Vec3 eyes, BlockPos target) {
+        if (target == null || eyes == null) {
+            return false;
+        }
         Vec3 center = Vec3.atCenterOf(target);
         double dx = center.x - eyes.x;
         double dy = center.y - eyes.y;
@@ -2909,6 +3000,10 @@ public class AIPlayerEntity extends Zombie {
     private BlockPos findApproachPosition(BlockPos target) {
         if (target == null) {
             return null;
+        }
+        BlockPos standPos = this.findStandPositionForBlock(target);
+        if (standPos != null) {
+            return standPos;
         }
         List<BlockPos> candidates = new ArrayList<>();
         for (Direction direction : Direction.Plane.HORIZONTAL) {
@@ -2939,6 +3034,36 @@ public class AIPlayerEntity extends Zombie {
                 .filter(pos -> this.canStandAt(pos, true))
                 .min(Comparator.comparingDouble(pos -> this.scoreApproachCandidate(pos, target)))
                 .orElse(null);
+    }
+
+    private BlockPos findStandPositionForBlock(BlockPos target) {
+        List<BlockPos> candidates = new ArrayList<>();
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            for (int step = 1; step <= 2; step++) {
+                BlockPos lateral = target.relative(direction, step);
+                candidates.add(lateral);
+                candidates.add(lateral.above());
+                candidates.add(lateral.below());
+            }
+        }
+        candidates.add(target.north().east());
+        candidates.add(target.north().west());
+        candidates.add(target.south().east());
+        candidates.add(target.south().west());
+
+        return candidates.stream()
+                .distinct()
+                .filter(candidate -> this.canStandAt(candidate, true))
+                .filter(candidate -> this.canHarvestFromPosition(Vec3.atCenterOf(candidate).add(0.0D, 1.5D, 0.0D), target))
+                .min(Comparator.comparingDouble(candidate -> this.scoreStandPosition(candidate, target)))
+                .orElse(null);
+    }
+
+    private double scoreStandPosition(BlockPos candidate, BlockPos target) {
+        double selfDistance = this.distanceToSqr(Vec3.atCenterOf(candidate));
+        double targetDistance = candidate.distSqr(target);
+        double verticalDelta = Math.abs(candidate.getY() - target.getY());
+        return selfDistance + targetDistance * 1.8D + verticalDelta * 0.75D;
     }
 
     private boolean canStandAt(BlockPos pos) {
@@ -3021,41 +3146,10 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private boolean harvestBlock(BlockPos pos, boolean woodTask) {
-        if (!(this.level() instanceof ServerLevel serverLevel)) {
-            return false;
-        }
-        if (!serverLevel.getGameRules().get(GameRules.MOB_GRIEFING)) {
-            this.lastObservation = "服务器关闭了生物破坏方块，无法执行采集任务。";
-            return false;
-        }
-
-        BlockState state = serverLevel.getBlockState(pos);
         if (!this.isValidHarvestTarget(pos, woodTask)) {
             return false;
         }
-
-        this.facePosition(Vec3.atCenterOf(pos));
-        this.swing(InteractionHand.MAIN_HAND);
-        BlockEntity blockEntity = serverLevel.getBlockEntity(pos);
-        ItemStack tool = this.getMainHandItem().copy();
-        List<ItemStack> drops = Block.getDrops(state, serverLevel, pos, blockEntity, this, tool);
-
-        serverLevel.levelEvent(2001, pos, Block.getId(state));
-        serverLevel.setBlock(pos, Blocks.AIR.defaultBlockState(), 3);
-        WorldScanner.invalidateAt(serverLevel, pos);
-        TeamKnowledge.forgetResourceNear(this, woodTask ? ResourceType.WOOD : ResourceType.ORE, pos, 9.0D);
-
-        for (ItemStack stack : drops) {
-            ItemStack remainder = this.storeInBackpack(stack.copy());
-            if (!remainder.isEmpty()) {
-                this.spawnAtLocation(serverLevel, remainder);
-            }
-        }
-
-        this.lastObservation = (woodTask ? "已采集木头@" : "已采集矿石@") + this.formatPos(pos);
-        this.remember("资源", this.lastObservation);
-        this.reportTaskProgress(this.activeTaskName, woodTask ? "已采集木头：" + this.formatPos(pos) : "已采集矿石：" + this.formatPos(pos));
-        return true;
+        return this.mineBlockTick(pos, woodTask ? MiningMode.HARVEST_WOOD : MiningMode.HARVEST_ORE, woodTask ? "已采集木头@" : "已采集矿石@");
     }
 
     private boolean placeShelterBlock(BlockPos pos) {
@@ -4632,5 +4726,12 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private record DeliveryRequest(String label, boolean deliverAll, int requestedCount, Predicate<ItemStack> matcher) {
+    }
+
+    private enum MiningMode {
+        NONE,
+        AUXILIARY,
+        HARVEST_WOOD,
+        HARVEST_ORE
     }
 }

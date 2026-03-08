@@ -38,6 +38,7 @@ final class PathManager {
     private BlockPos targetPos;
     private int pathIndex;
     private double speedModifier = 1.0D;
+    private PathState pathState = PathState.IDLE;
     private String pathStatus = "空闲";
     private long activePathStartTick;
     private long lastNodeActionTick;
@@ -50,9 +51,11 @@ final class PathManager {
     boolean requestPathTo(BlockPos target, double speedModifier) {
         BlockPos resolvedTarget = this.entity.runtimeResolveMovementTarget(target);
         if (resolvedTarget == null) {
+            this.pathState = PathState.IDLE;
             this.pathStatus = "目标不可达";
             return false;
         }
+        this.pathState = PathState.PATHING;
         long gameTime = this.entity.level().getGameTime();
         boolean sameTargetRegion = this.targetPos != null && this.targetPos.distSqr(resolvedTarget) <= 4.0D;
         boolean hasPath = !this.activePath.isEmpty();
@@ -82,6 +85,7 @@ final class PathManager {
         this.pathCooldown.markPathRequest(gameTime);
         boolean budgetGranted = TeamKnowledge.tryAcquirePathBudget(this.entity, gameTime);
         if (!budgetGranted && hasPath && !this.isSeverelyStuck()) {
+            this.pathState = PathState.MOVING;
             this.pathStatus = "团队路径预算忙，沿用当前路径";
             return true;
         }
@@ -104,6 +108,7 @@ final class PathManager {
         this.targetPos = null;
         this.pathIndex = 0;
         this.speedModifier = 1.0D;
+        this.pathState = PathState.IDLE;
         this.pathStatus = "空闲";
         this.activePathStartTick = 0L;
         this.lastNodeActionTick = 0L;
@@ -130,6 +135,7 @@ final class PathManager {
         if (this.activePathTimedOut(gameTime)) {
             this.activePath = List.of();
             this.pathIndex = 0;
+            this.pathState = PathState.REPATH;
             this.pathStatus = "路径超时，准备重算";
         }
 
@@ -145,6 +151,7 @@ final class PathManager {
         if (this.pathIndex >= this.activePath.size()) {
             this.activePath = List.of();
             this.pathIndex = 0;
+            this.pathState = PathState.REPATH;
             this.pathStatus = "路径节点耗尽，准备重算";
             driveDirectFallback(gameTime);
             return;
@@ -175,6 +182,7 @@ final class PathManager {
         applyMoveToward(waypoint, appliedSpeed, currentNode.jumpRequired() || liquidEscape != null, gameTime);
 
         if (liquidEscape == null) {
+            this.pathState = PathState.MOVING;
             this.pathStatus = this.pathIndex < this.activePath.size() - 1
                     ? "沿路径推进（" + (this.pathIndex + 1) + "/" + this.activePath.size() + "）"
                     : "最终接近目标";
@@ -209,7 +217,7 @@ final class PathManager {
     }
 
     String getPathStatus() {
-        return this.pathStatus;
+        return this.pathState.name() + "|" + this.pathStatus;
     }
 
     BlockPos getActiveTargetPos() {
@@ -220,6 +228,7 @@ final class PathManager {
         this.activePath = planned == null ? List.of() : planned;
         this.pathIndex = 0;
         this.activePathStartTick = gameTime;
+        this.pathState = this.activePath.isEmpty() ? PathState.IDLE : PathState.MOVING;
         this.stuckDetector.reset(this.entity.position(), this.entity.getYRot(), gameTime);
     }
 
@@ -241,6 +250,7 @@ final class PathManager {
         this.activePath = List.of();
         this.targetPos = null;
         this.pathIndex = 0;
+        this.pathState = PathState.IDLE;
         this.activePathStartTick = 0L;
         this.lastNodeActionTick = 0L;
         this.lastRecoveryJumpTick = 0L;
@@ -269,6 +279,7 @@ final class PathManager {
         }
         if (bestIndex > this.pathIndex) {
             this.pathIndex = bestIndex;
+            this.pathState = PathState.MOVING;
             this.pathStatus = "前瞻平滑：跳过中间节点";
         }
         return this.activePath.get(this.pathIndex).position();
@@ -323,6 +334,7 @@ final class PathManager {
         }
 
         this.pathStatus = "局部避障中";
+        this.pathState = PathState.STUCK;
         boolean climbNeeded = waypoint != null && waypoint.y > this.entity.getY() + 0.45D;
         if (this.entity.onGround()
                 && !this.entity.runtimeHasLowCeiling()
@@ -362,6 +374,7 @@ final class PathManager {
                 } else {
                     this.pathStatus = "路径重算完成";
                 }
+                this.pathState = PathState.REPATH;
                 applyNewPath(replanned, gameTime);
                 this.pathCooldown.markSevereReplan(gameTime);
             } else {
@@ -460,6 +473,7 @@ final class PathManager {
         double speedHint = Math.max(0.82D, computeAppliedSpeed(distance));
         boolean shouldJump = this.entity.horizontalCollision || fallback.y - this.entity.getY() > 0.48D;
         applyMoveToward(fallback, speedHint, shouldJump, gameTime);
+        this.pathState = PathState.MOVING;
         this.pathStatus = "路径空闲兜底：直控逼近目标";
     }
 
@@ -471,9 +485,11 @@ final class PathManager {
         if (resolved != null) {
             this.targetPos = resolved.immutable();
             applyNewPath(List.of(PathNode.move(Vec3.atCenterOf(resolved))), gameTime);
+            this.pathState = PathState.REPATH;
             this.pathStatus = "检测到原地转圈，重置为局部直控路径";
         } else {
             this.activePath = List.of();
+            this.pathState = PathState.STUCK;
             this.pathStatus = "检测到原地转圈，等待重算路径";
         }
         this.stuckDetector.setStuckAtLeast(LOCAL_RECOVERY_TICKS);
@@ -486,5 +502,13 @@ final class PathManager {
             return false;
         }
         return Math.abs(waypoint.y - this.entity.getY()) <= maxYAbs;
+    }
+
+    private enum PathState {
+        IDLE,
+        PATHING,
+        MOVING,
+        STUCK,
+        REPATH
     }
 }
