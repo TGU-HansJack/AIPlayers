@@ -3,6 +3,7 @@ package com.mcmod.aiplayers.entity;
 import com.mcmod.aiplayers.ai.AIServiceManager;
 import com.mcmod.aiplayers.ai.AIServiceResponse;
 import com.mcmod.aiplayers.ai.AITaskPlanResponse;
+import com.mcmod.aiplayers.menu.AIPlayerBackpackMenu;
 import com.mcmod.aiplayers.registry.ModEntities;
 import com.mcmod.aiplayers.system.AILongTermMemoryStore;
 import com.mcmod.aiplayers.system.AIAgentPipeline;
@@ -59,10 +60,13 @@ import net.minecraft.world.entity.ai.goal.RandomLookAroundGoal;
 import net.minecraft.world.entity.ai.goal.target.HurtByTargetGoal;
 import net.minecraft.world.entity.ai.navigation.PathNavigation;
 import net.minecraft.world.entity.monster.Enemy;
-import net.minecraft.world.entity.monster.zombie.Zombie;
+import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.PathfinderMob;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.Projectile;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.SimpleMenuProvider;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -85,7 +89,7 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.FluidTags;
 
-public class AIPlayerEntity extends Zombie {
+public class AIPlayerEntity extends PathfinderMob {
     private static final EntityDataAccessor<String> DATA_AI_NAME = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<String> DATA_OWNER_ID = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
     private static final EntityDataAccessor<String> DATA_MODE = SynchedEntityData.defineId(AIPlayerEntity.class, EntityDataSerializers.STRING);
@@ -125,6 +129,9 @@ public class AIPlayerEntity extends Zombie {
     private static final double TELEPORT_FOLLOW_DISTANCE_SQR = 32.0D * 32.0D;
     private static final int ALERT_COOLDOWN_TICKS = 120;
     private static final float WASD_MAX_YAW_STEP = 36.0F;
+    private static final double LOCAL_BLOCKER_CHECK_DISTANCE = HARVEST_REACH + 1.75D;
+    private static final double HUNT_SCAN_RANGE = 28.0D;
+    private static final int AWARENESS_BROADCAST_INTERVAL = 20 * 12;
 
     private final NonNullList<ItemStack> backpack = NonNullList.withSize(BACKPACK_SIZE, ItemStack.EMPTY);
     private final List<String> memory = new ArrayList<>();
@@ -211,8 +218,14 @@ public class AIPlayerEntity extends Zombie {
     private BlockPos harvestTaskMoveTarget;
     private int harvestTaskStateTick;
     private int harvestTaskLastProgressTick;
+    private String huntTargetId = "";
+    private String huntTargetLabel = "";
+    private BlockPos huntLastKnownPos;
+    private String lastEnvironmentSignature = "";
+    private int nextAwarenessBroadcastTick;
+    private boolean pendingAwarenessBroadcast;
 
-    public AIPlayerEntity(EntityType<? extends Zombie> entityType, Level level) {
+    public AIPlayerEntity(EntityType<? extends PathfinderMob> entityType, Level level) {
         super(entityType, level);
         this.setPersistenceRequired();
         this.setCanPickUpLoot(false);
@@ -252,7 +265,7 @@ public class AIPlayerEntity extends Zombie {
     }
 
     public static AttributeSupplier.Builder createAttributes() {
-        return Zombie.createAttributes()
+        return Mob.createMobAttributes()
                 .add(Attributes.MAX_HEALTH, 20.0D)
                 .add(Attributes.MOVEMENT_SPEED, 0.32D)
                 .add(Attributes.ATTACK_DAMAGE, 5.0D)
@@ -269,11 +282,6 @@ public class AIPlayerEntity extends Zombie {
         this.goalSelector.addGoal(7, new LookAtPlayerGoal(this, Player.class, 8.0F));
         this.goalSelector.addGoal(8, new RandomLookAroundGoal(this));
         this.targetSelector.addGoal(1, new HurtByTargetGoal(this));
-    }
-
-    @Override
-    protected boolean isSunSensitive() {
-        return false;
     }
 
     @Override
@@ -298,6 +306,23 @@ public class AIPlayerEntity extends Zombie {
         }
         SoundType soundType = state.getSoundType();
         this.playSound(soundType.getStepSound(), soundType.getVolume() * 0.15F, soundType.getPitch());
+    }
+
+    @Override
+    public InteractionResult mobInteract(Player player, InteractionHand hand) {
+        if (hand != InteractionHand.MAIN_HAND || !this.canOpenBackpack(player)) {
+            return super.mobInteract(player, hand);
+        }
+        if (this.level().isClientSide()) {
+            return InteractionResult.SUCCESS;
+        }
+        if (player instanceof ServerPlayer serverPlayer) {
+            serverPlayer.openMenu(new SimpleMenuProvider(
+                    (containerId, inventory, openedPlayer) -> AIPlayerBackpackMenu.server(containerId, inventory, this),
+                    this.getBackpackMenuTitle()));
+            return InteractionResult.CONSUME;
+        }
+        return InteractionResult.SUCCESS;
     }
 
     @Override
@@ -348,6 +373,7 @@ public class AIPlayerEntity extends Zombie {
         }
 
         this.tickNavigationState();
+        this.tickEnvironmentAwareness();
 
         if (AITickScheduler.shouldSyncTelemetry(this.tickCount)) {
             this.syncClientTelemetry();
@@ -388,6 +414,93 @@ public class AIPlayerEntity extends Zombie {
         return this.ownerId == null || this.ownerId.equals(player.getUUID());
     }
 
+    public boolean canOpenBackpack(Player player) {
+        if (player == null || !player.isAlive() || this.isRemoved()) {
+            return false;
+        }
+        if (player.distanceToSqr(this) > 64.0D) {
+            return false;
+        }
+        if (player instanceof ServerPlayer serverPlayer) {
+            return this.canReceiveOrdersFrom(serverPlayer);
+        }
+        return this.ownerId == null || this.ownerId.equals(player.getUUID());
+    }
+
+    public int getBackpackSize() {
+        return this.backpack.size();
+    }
+
+    public ItemStack getBackpackStack(int slot) {
+        return slot >= 0 && slot < this.backpack.size() ? this.backpack.get(slot) : ItemStack.EMPTY;
+    }
+
+    public void setBackpackStack(int slot, ItemStack stack) {
+        if (slot < 0 || slot >= this.backpack.size()) {
+            return;
+        }
+        this.backpack.set(slot, stack == null ? ItemStack.EMPTY : stack);
+        this.markPersistentDirty();
+    }
+
+    public ItemStack removeBackpackStack(int slot, int amount) {
+        if (slot < 0 || slot >= this.backpack.size() || amount <= 0) {
+            return ItemStack.EMPTY;
+        }
+        ItemStack existing = this.backpack.get(slot);
+        if (existing.isEmpty()) {
+            return ItemStack.EMPTY;
+        }
+        ItemStack removed;
+        if (existing.getCount() <= amount) {
+            removed = existing;
+            this.backpack.set(slot, ItemStack.EMPTY);
+        } else {
+            removed = existing.split(amount);
+            if (existing.isEmpty()) {
+                this.backpack.set(slot, ItemStack.EMPTY);
+            }
+        }
+        this.markPersistentDirty();
+        return removed;
+    }
+
+    public ItemStack removeBackpackStackNoUpdate(int slot) {
+        if (slot < 0 || slot >= this.backpack.size()) {
+            return ItemStack.EMPTY;
+        }
+        ItemStack existing = this.backpack.get(slot);
+        this.backpack.set(slot, ItemStack.EMPTY);
+        this.markPersistentDirty();
+        return existing;
+    }
+
+    public Component getBackpackMenuTitle() {
+        return Component.literal(this.getAIName() + " 的背包");
+    }
+
+    public String startAnimalHunt(ServerPlayer speaker, String targetId, String label) {
+        if (speaker != null) {
+            this.assignOwner(speaker);
+        }
+        this.huntTargetId = targetId == null ? "" : targetId;
+        this.huntTargetLabel = label == null || label.isBlank() ? this.huntTargetId : label;
+        this.huntLastKnownPos = null;
+        this.playerModePinned = true;
+        this.playerPinnedMode = AIPlayerMode.SURVIVE;
+        this.clearTaskAiPlanState();
+        this.agentRuntime.applyDirectedGoal(speaker, AgentGoal.of(GoalType.SURVIVE, "player", "\u73a9\u5bb6\u8981\u6c42\u72e9\u730e" + this.huntTargetLabel), true);
+        this.latestAgentGoal = "\u72e9\u730e" + this.huntTargetLabel;
+        this.setMode(AIPlayerMode.SURVIVE);
+        this.remember("\u72e9\u730e", "\u5f00\u59cb\u653b\u51fb\u76ee\u6807\uff1a" + this.huntTargetLabel);
+        this.markPersistentDirty();
+        return "\u6536\u5230\uff0c\u6211\u4f1a\u4e3b\u52a8\u641c\u7d22\u5e76\u653b\u51fb\u9644\u8fd1\u7684" + this.huntTargetLabel + "\u3002";
+    }
+
+    public void onBackpackChanged() {
+        this.markPersistentDirty();
+    }
+
     public void applyCommandedMode(ServerPlayer speaker, AIPlayerMode newMode) {
         if (speaker != null) {
             this.applyPlayerDirectedMode(speaker, newMode);
@@ -419,6 +532,7 @@ public class AIPlayerEntity extends Zombie {
         this.playerModePinned = true;
         this.playerPinnedMode = newMode;
         this.clearTaskAiPlanState();
+        this.clearHuntDirective();
         this.agentRuntime.applyDirectedGoal(speaker, AgentGoal.of(GoalType.fromMode(newMode), "player", "player command"), true);
         this.setMode(newMode);
     }
@@ -700,6 +814,203 @@ public class AIPlayerEntity extends Zombie {
         return "我现在最缺的是：" + String.join("、", needs) + "。";
     }
 
+    public String getEnvironmentSummary() {
+        List<String> parts = new ArrayList<>();
+        parts.add((this.level().getDayTime() % 24000L) >= 12500L ? "\u591c\u665a" : "\u767d\u5929");
+        if (this.level().isThundering()) {
+            parts.add("\u96f7\u96e8");
+        } else if (this.level().isRaining()) {
+            parts.add("\u4e0b\u96e8");
+        }
+        if (this.level().canSeeSky(this.blockPosition())) {
+            parts.add("\u9732\u5929");
+        } else if (this.runtimeHasLowCeiling()) {
+            parts.add("\u96f7\u96e8");
+        } else {
+            parts.add("\u4e0b\u96e8");
+        }
+        if (this.isInWater() || this.isUnderWater()) {
+            parts.add("\u5728\u6c34\u4e2d");
+        }
+        if (this.isInLava()) {
+            parts.add("\u5728\u5ca9\u6d46\u4e2d");
+        }
+        if (this.isOnFire()) {
+            parts.add("\u7740\u706b");
+        }
+        if (this.getHealth() <= 8.0F) {
+            parts.add("\u8840\u91cf\u504f\u4f4e");
+        }
+        if (this.hasLowFoodSupply()) {
+            parts.add("\u98df\u7269\u504f\u5c11");
+        }
+        if (this.hasLowTools()) {
+            parts.add("\u5de5\u5177\u504f\u5c11");
+        }
+        if (this.observedHostile != null && this.observedHostile.isAlive()) {
+            parts.add("\u9644\u8fd1\u654c\u5bf9=" + this.observedHostile.getName().getString());
+        }
+        if (this.observedDrop != null && this.observedDrop.isAlive()) {
+            parts.add("\u9644\u8fd1\u6389\u843d\u7269=" + this.observedDrop.getItem().getHoverName().getString());
+        }
+        ServerPlayer owner = this.getOwnerPlayer();
+        if (owner != null && !owner.isRemoved()) {
+            parts.add("\u4e3b\u4eba\u8ddd\u79bb=" + Math.max(0, Mth.floor(this.distanceTo(owner))));
+        }
+        if (this.huntTargetLabel != null && !this.huntTargetLabel.isBlank()) {
+            parts.add("\u72e9\u730e\u76ee\u6807=" + this.huntTargetLabel);
+        }
+        return String.join("\uff1b", parts);
+    }
+
+    private void clearHuntDirective() {
+        this.huntTargetId = "";
+        this.huntTargetLabel = "";
+        this.huntLastKnownPos = null;
+        this.markPersistentDirty();
+    }
+
+    private boolean hasActiveHuntDirective() {
+        return this.huntTargetId != null && !this.huntTargetId.isBlank();
+    }
+
+    private boolean performHuntDirective() {
+        if (!this.hasActiveHuntDirective()) {
+            return false;
+        }
+        if (this.observedHostile != null && this.observedHostile.isAlive() && this.distanceToSqr(this.observedHostile) <= 49.0D) {
+            return false;
+        }
+        LivingEntity target = this.findNearestHuntTarget();
+        if (target != null) {
+            this.huntLastKnownPos = target.blockPosition().immutable();
+            this.setTarget(target);
+            this.setForcedLookTarget(target.getEyePosition(), 10);
+            this.lastObservation = "\u9501\u5b9a\u72e9\u730e\u76ee\u6807 " + target.getName().getString() + "@" + this.formatPos(target.blockPosition());
+            if (this.distanceToSqr(target) > 9.0D) {
+                BlockPos moveTarget = this.runtimeResolveMovementTarget(target.blockPosition());
+                if (moveTarget != null) {
+                    this.navigateToPosition(moveTarget, 1.12D);
+                }
+            }
+            return true;
+        }
+        if (this.huntLastKnownPos != null && this.distanceToSqr(Vec3.atCenterOf(this.huntLastKnownPos)) > 6.25D) {
+            BlockPos moveTarget = this.runtimeResolveMovementTarget(this.huntLastKnownPos);
+            if (moveTarget != null) {
+                this.lastObservation = "\u6b63\u5728\u8ffd\u8e2a" + this.huntTargetLabel + "\u6700\u8fd1\u51fa\u73b0\u7684\u4f4d\u7f6e@" + this.formatPos(this.huntLastKnownPos);
+                this.navigateToPosition(moveTarget, 1.05D);
+                return true;
+            }
+        }
+        ServerPlayer owner = this.getOwnerPlayer();
+        if (owner != null && this.distanceToSqr(owner) > 12.0D * 12.0D) {
+            this.performFollow(false);
+            return true;
+        }
+        this.lastObservation = "\u6b63\u5728\u641c\u7d22\u9644\u8fd1\u7684" + this.huntTargetLabel + "\u3002";
+        if (this.tickCount % 40 == 0) {
+            BlockPos destination = this.findExplorationDestination();
+            if (destination != null) {
+                this.navigateToPosition(destination, 1.0D);
+            }
+        }
+        return true;
+    }
+
+    private LivingEntity findNearestHuntTarget() {
+        AABB searchBox = this.getBoundingBox().inflate(HUNT_SCAN_RANGE);
+        ServerPlayer owner = this.getOwnerPlayer();
+        if (owner != null && !owner.isRemoved()) {
+            searchBox = searchBox.minmax(owner.getBoundingBox().inflate(HUNT_SCAN_RANGE));
+        }
+        return this.level().getEntitiesOfClass(LivingEntity.class, searchBox, entity -> entity != this
+                        && entity.isAlive()
+                        && AnimalTargetHelper.matchesRequestedAnimal(entity, this.huntTargetId))
+                .stream()
+                .min(Comparator.comparingDouble(this::distanceToSqr))
+                .orElse(null);
+    }
+
+    private String buildEnvironmentSignature() {
+        String hostileKey = this.observedHostile != null && this.observedHostile.isAlive()
+                ? this.observedHostile.getType().getDescription().getString()
+                : "";
+        boolean ownerFar = false;
+        ServerPlayer owner = this.getOwnerPlayer();
+        if (owner != null && !owner.isRemoved()) {
+            ownerFar = this.distanceToSqr(owner) > OWNER_TELEPORT_FOLLOW_DISTANCE_SQR;
+        }
+        return ((this.level().getDayTime() % 24000L) >= 12500L ? "night" : "day")
+                + '|' + (this.level().isRaining() ? '1' : '0')
+                + '|' + (this.level().isThundering() ? '1' : '0')
+                + '|' + (this.level().canSeeSky(this.blockPosition()) ? '1' : '0')
+                + '|' + ((this.isInWater() || this.isUnderWater()) ? '1' : '0')
+                + '|' + (this.isInLava() ? '1' : '0')
+                + '|' + (this.isOnFire() ? '1' : '0')
+                + '|' + (this.getHealth() <= 8.0F ? '1' : '0')
+                + '|' + (this.hasLowFoodSupply() ? '1' : '0')
+                + '|' + (this.hasLowTools() ? '1' : '0')
+                + '|' + (ownerFar ? '1' : '0')
+                + '|' + hostileKey;
+    }
+
+    private void tickEnvironmentAwareness() {
+        if (this.tickCount % 20 != 0) {
+            return;
+        }
+        ServerPlayer owner = this.getOwnerPlayer();
+        if (owner == null || owner.isRemoved() || owner.isSpectator()) {
+            return;
+        }
+        String signature = this.buildEnvironmentSignature();
+        if (signature.equals(this.lastEnvironmentSignature)) {
+            return;
+        }
+        this.lastEnvironmentSignature = signature;
+        if (this.tickCount < this.nextAwarenessBroadcastTick) {
+            return;
+        }
+        String fallbackMessage = this.buildEnvironmentBroadcastFallback();
+        if (fallbackMessage.isBlank()) {
+            return;
+        }
+        this.nextAwarenessBroadcastTick = this.tickCount + AWARENESS_BROADCAST_INTERVAL;
+        if (!AIServiceManager.canUseConversationService()) {
+            this.sendOwnerAlert(fallbackMessage, false);
+            return;
+        }
+        this.requestAwarenessBroadcast(owner, fallbackMessage);
+    }
+
+    private String buildEnvironmentBroadcastFallback() {
+        return "\u73af\u5883\u53d8\u5316\uff1a" + this.getEnvironmentSummary();
+    }
+
+    private void requestAwarenessBroadcast(ServerPlayer owner, String fallbackMessage) {
+        if (this.pendingAwarenessBroadcast) {
+            return;
+        }
+        this.pendingAwarenessBroadcast = true;
+        String prompt = "\u8fd9\u4e0d\u662f\u73a9\u5bb6\u547d\u4ee4\uff0c\u800c\u662f AI \u7684\u73af\u5883\u81ea\u68c0\u64ad\u62a5\u3002\u8bf7\u53ea\u7528\u4e00\u53e5\u7b80\u77ed\u4e2d\u6587\u64ad\u62a5\u5f53\u524d\u73af\u5883\uff0c\u4e0d\u8981\u7ed9\u6a21\u5f0f\u3001\u52a8\u4f5c\u6216\u76ee\u6807\u6307\u4ee4\u3002\u73af\u5883\u6458\u8981\uff1a"
+                + this.getEnvironmentSummary();
+        AIServiceManager.tryRespondAsync(this, owner, prompt).whenComplete((response, throwable) -> {
+            var server = owner.level().getServer();
+            if (server == null) {
+                this.pendingAwarenessBroadcast = false;
+                return;
+            }
+            server.execute(() -> {
+                this.pendingAwarenessBroadcast = false;
+                String reply = fallbackMessage;
+                if (throwable == null && response != null && response.reply() != null && !response.reply().isBlank()) {
+                    reply = response.reply();
+                }
+                this.sendOwnerAlert(reply, false);
+            });
+        });
+    }
+
     private String normalizeConversationText(String content) {
         if (content == null) {
             return "";
@@ -916,6 +1227,10 @@ public class AIPlayerEntity extends Zombie {
 
         if (this.getTarget() != null && !this.getTarget().isAlive()) {
             this.setTarget(null);
+        }
+
+        if (this.performHuntDirective()) {
+            return;
         }
 
         switch (this.safeMode()) {
@@ -1319,12 +1634,9 @@ public class AIPlayerEntity extends Zombie {
 
         BlockPos focusTarget = obstacle != null ? obstacle : target;
         BlockPos approach = this.findApproachPosition(focusTarget);
-        BlockPos navigationGoal = approach != null ? approach : this.findWalkablePositionNear(target, 2, 3);
-        if (navigationGoal == null) {
-            navigationGoal = focusTarget;
-        }
+        BlockPos navigationGoal = approach != null ? approach : this.runtimeResolveMovementTarget(focusTarget);
 
-        if (!this.navigateToPosition(navigationGoal, 1.05D)) {
+        if (navigationGoal == null || !this.navigateToPosition(navigationGoal, 1.05D)) {
             this.lastObservation = "目标路径受阻，正在重新规划@" + this.formatPos(target);
             this.reportTaskFailure(this.activeTaskName, "采集目标路径受阻：" + this.formatPos(target));
             if (woodTask) {
@@ -2412,7 +2724,7 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private BlockPos findNavigationObstacle(BlockPos target) {
-        BlockPos blocker = this.findBlockingBlockOnLine(target);
+        BlockPos blocker = this.findBlockingBlockOnLine(target, LOCAL_BLOCKER_CHECK_DISTANCE);
         if (blocker == null) {
             return null;
         }
@@ -2421,15 +2733,30 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private BlockPos findHarvestObstacle(BlockPos target, boolean woodTask) {
-        BlockPos blocker = this.findBlockingBlockOnLine(target);
+        if (target == null) {
+            return null;
+        }
+        double maxDistance = LOCAL_BLOCKER_CHECK_DISTANCE + 0.75D;
+        BlockPos blocker = this.findBlockingBlockOnLine(target, maxDistance);
         if (blocker != null && this.isBreakableHarvestObstacle(this.level().getBlockState(blocker), woodTask)) {
             return blocker;
+        }
+        if (this.distanceToSqr(Vec3.atCenterOf(target)) > maxDistance * maxDistance) {
+            return null;
         }
         return this.isExposed(target) ? null : this.findAdjacentHarvestCover(target, woodTask);
     }
 
-    private BlockPos findBlockingBlockOnLine(BlockPos target) {
-        BlockHitResult hitResult = this.level().clip(new ClipContext(this.getEyePosition(), Vec3.atCenterOf(target), ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, this));
+    private BlockPos findBlockingBlockOnLine(BlockPos target, double maxDistance) {
+        if (target == null) {
+            return null;
+        }
+        Vec3 targetCenter = Vec3.atCenterOf(target);
+        Vec3 eye = this.getEyePosition();
+        if (eye.distanceTo(targetCenter) > Math.max(1.0D, maxDistance)) {
+            return null;
+        }
+        BlockHitResult hitResult = this.level().clip(new ClipContext(eye, targetCenter, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, this));
         if (hitResult.getType() != HitResult.Type.BLOCK) {
             return null;
         }
@@ -3483,17 +3810,27 @@ public class AIPlayerEntity extends Zombie {
     private BlockPos findStandPositionForBlock(BlockPos target) {
         List<BlockPos> candidates = new ArrayList<>();
         for (Direction direction : Direction.Plane.HORIZONTAL) {
-            for (int step = 1; step <= 2; step++) {
+            for (int step = 1; step <= 4; step++) {
                 BlockPos lateral = target.relative(direction, step);
                 candidates.add(lateral);
                 candidates.add(lateral.above());
+                candidates.add(lateral.above().above());
                 candidates.add(lateral.below());
+                candidates.add(lateral.below().below());
             }
         }
         candidates.add(target.north().east());
         candidates.add(target.north().west());
         candidates.add(target.south().east());
         candidates.add(target.south().west());
+        candidates.add(target.north(2).east());
+        candidates.add(target.north(2).west());
+        candidates.add(target.south(2).east());
+        candidates.add(target.south(2).west());
+        candidates.add(target.north().east(2));
+        candidates.add(target.north().west(2));
+        candidates.add(target.south().east(2));
+        candidates.add(target.south().west(2));
 
         return candidates.stream()
                 .distinct()
@@ -3918,6 +4255,9 @@ public class AIPlayerEntity extends Zombie {
         this.rememberedCrop = this.readBlockPos(tag, "RememberedCrop");
         this.shelterAnchor = this.readBlockPos(tag, "ShelterAnchor");
         this.lastExploreRecord = this.readBlockPos(tag, "LastExploreRecord");
+        this.huntTargetId = tag.getString("HuntTargetId").orElse("");
+        this.huntTargetLabel = tag.getString("HuntTargetLabel").orElse("");
+        this.huntLastKnownPos = this.readBlockPos(tag, "HuntLastKnownPos");
 
         this.deserializeMemory(tag.getString("MemoryData").orElse(""));
         this.deserializeBackpack(tag.getString("BackpackData").orElse(""));
@@ -3948,6 +4288,9 @@ public class AIPlayerEntity extends Zombie {
         this.writeBlockPos(tag, "RememberedCrop", this.rememberedCrop);
         this.writeBlockPos(tag, "ShelterAnchor", this.shelterAnchor);
         this.writeBlockPos(tag, "LastExploreRecord", this.lastExploreRecord);
+        tag.putString("HuntTargetId", this.huntTargetId == null ? "" : this.huntTargetId);
+        tag.putString("HuntTargetLabel", this.huntTargetLabel == null ? "" : this.huntTargetLabel);
+        this.writeBlockPos(tag, "HuntLastKnownPos", this.huntLastKnownPos);
         this.persistentStateDirty = false;
     }
 
@@ -4612,12 +4955,14 @@ public class AIPlayerEntity extends Zombie {
         this.playerModePinned = pin;
         this.playerPinnedMode = goal.type().coarseMode();
         this.clearTaskAiPlanState();
+        this.clearHuntDirective();
         this.agentRuntime.applyDirectedGoal(speaker, goal, pin);
     }
 
     void runtimeStopGoal() {
         this.clearPlayerModePin();
         this.clearTaskAiPlanState();
+        this.clearHuntDirective();
         this.agentRuntime.clearDirectedGoal();
         this.setMode(AIPlayerMode.IDLE);
     }
@@ -4655,10 +5000,7 @@ public class AIPlayerEntity extends Zombie {
             return false;
         }
         BlockPos resolved = this.runtimeResolveMovementTarget(pos);
-        if (resolved != null && this.navigateToPosition(resolved, speed)) {
-            return true;
-        }
-        return this.navigateToPosition(pos, speed);
+        return resolved != null && this.navigateToPosition(resolved, speed);
     }
 
     boolean runtimeAttemptImmediateRecovery() {
@@ -5023,8 +5365,7 @@ public class AIPlayerEntity extends Zombie {
         if (expanded != null) {
             return expanded;
         }
-        BlockPos dryStand = this.findNearbyDryStandPosition(pos, 8, 6);
-        return dryStand != null ? dryStand : pos;
+        return this.findNearbyDryStandPosition(pos, 8, 6);
     }
 
     boolean runtimeCanStandAt(BlockPos pos) {
@@ -5234,3 +5575,4 @@ public class AIPlayerEntity extends Zombie {
         HARVEST_ORE
     }
 }
+

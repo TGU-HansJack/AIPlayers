@@ -34,6 +34,13 @@ public final class ConversationRouter {
                 return directive.reply();
             }
         }
+        AnimalTargetHelper.HuntTarget huntTarget = AnimalTargetHelper.parseHuntDirective(content);
+        if (huntTarget != null) {
+            return entity.startAnimalHunt(speaker, huntTarget.targetId(), huntTarget.label());
+        }
+        if (AnimalTargetHelper.mentionsAttackIntent(content)) {
+            return "请告诉我要攻击的原版动物，例如：" + AnimalTargetHelper.supportedAnimalsSummary() + "。";
+        }
         if (!AIServiceManager.canUseConversationService()) {
             return entity.runtimeBuildLocalConversationReply(speaker, content, false);
         }

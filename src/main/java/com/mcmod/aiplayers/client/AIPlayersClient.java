@@ -2,17 +2,21 @@ package com.mcmod.aiplayers.client;
 
 import com.mcmod.aiplayers.AIPlayersMod;
 import com.mcmod.aiplayers.client.render.AIPlayerRenderer;
+import com.mcmod.aiplayers.client.screen.AIPlayerBackpackScreen;
 import com.mcmod.aiplayers.client.screen.AIPlayersControlScreen;
 import com.mcmod.aiplayers.client.voice.AIPlayersVoiceClient;
+import com.mcmod.aiplayers.registry.ModMenus;
 import com.mcmod.aiplayers.registry.ModEntities;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.KeyMapping;
+import net.minecraft.client.gui.screens.MenuScreens;
 import net.minecraft.client.Minecraft;
 import net.minecraft.resources.Identifier;
 import net.minecraftforge.client.event.ClientChatReceivedEvent;
 import net.minecraftforge.client.event.EntityRenderersEvent;
 import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
 import org.lwjgl.glfw.GLFW;
 
 public final class AIPlayersClient {
@@ -40,6 +44,11 @@ public final class AIPlayersClient {
         if (name != null && !name.isBlank()) {
             selectedAiName = name;
         }
+    }
+
+
+    public static void onClientSetup(FMLClientSetupEvent event) {
+        event.enqueueWork(() -> MenuScreens.register(ModMenus.AI_PLAYER_BACKPACK.get(), AIPlayerBackpackScreen::new));
     }
 
     private static void registerRenderers(EntityRenderersEvent.RegisterRenderers event) {

@@ -4,6 +4,7 @@ import com.mcmod.aiplayers.ai.AIServiceManager;
 import com.mcmod.aiplayers.client.AIPlayersClient;
 import com.mcmod.aiplayers.entity.AgentConfigManager;
 import com.mcmod.aiplayers.registry.ModEntities;
+import com.mcmod.aiplayers.registry.ModMenus;
 import com.mcmod.aiplayers.system.AIPlayersChatHandler;
 import com.mcmod.aiplayers.system.AIPlayersCommands;
 import com.mcmod.aiplayers.system.PathRegressionRunner;
@@ -13,6 +14,7 @@ import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.event.ServerChatEvent;
 import net.minecraftforge.event.entity.EntityAttributeCreationEvent;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import net.minecraftforge.fml.loading.FMLEnvironment;
 import org.slf4j.Logger;
@@ -28,10 +30,12 @@ public class AIPlayersMod {
         AIServiceManager.initialize();
         AgentConfigManager.initialize();
         ModEntities.ENTITY_TYPES.register(modBusGroup);
+        ModMenus.MENU_TYPES.register(modBusGroup);
         EntityAttributeCreationEvent.BUS.addListener(ModEntities::registerAttributes);
 
         if (FMLEnvironment.dist == Dist.CLIENT) {
             AIPlayersClient.register();
+            FMLClientSetupEvent.getBus(modBusGroup).addListener(AIPlayersClient::onClientSetup);
         }
 
         RegisterCommandsEvent.BUS.addListener(AIPlayersCommands::register);
