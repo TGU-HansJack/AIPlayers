@@ -24,44 +24,94 @@ public final class InteractionPlanner {
     }
 
     private static InteractionPlan buildHarvestPlan(AIPlayerEntity entity, boolean woodTask) {
-        BlockPos target = entity.runtimeResolveHarvestTarget(woodTask);
-        if (target == null) {
-            BlockPos searchTarget = entity.resolveRuntimeTarget("explore", entity.blockPosition());
-            if (searchTarget != null && !entity.runtimeIsWithin(searchTarget, 2.56D)) {
-                return InteractionPlan.of(woodTask ? "搜索树木交互" : "搜索矿点交互", List.of(
-                        InteractionAction.recoverStuck("先尝试脱困"),
-                        InteractionAction.equipTool(woodTask, woodTask ? "准备斧头" : "准备镐子"),
-                        InteractionAction.moveNear(searchTarget, 1.0D, 2.56D, woodTask ? "搜索附近树木" : "搜索附近矿点"),
-                        InteractionAction.adjustView(searchTarget, woodTask ? "抬头观察树冠线索" : "观察地形与矿线"),
-                        InteractionAction.lookAt(searchTarget, woodTask ? "观察树木线索" : "观察矿点线索")));
-            }
-            return InteractionPlan.failed(woodTask ? "砍树交互" : "采矿交互", woodTask ? "未找到可采树木" : "未找到可采矿点");
-        }
-
+        AIPlayerEntity.HarvestTaskView task = entity.runtimeBuildHarvestTaskView(woodTask);
         List<InteractionAction> actions = new ArrayList<>();
         actions.add(InteractionAction.recoverStuck("先处理当前卡位"));
         actions.add(InteractionAction.equipTool(woodTask, woodTask ? "切换斧头采集" : "切换镐子采集"));
         if (entity.runtimeShouldUseShieldNow()) {
             actions.add(InteractionAction.raiseShield("进入采集前先举盾防御"));
         }
-        BlockPos obstacle = entity.runtimeFindHarvestObstacle(target, woodTask);
-        BlockPos focus = obstacle != null ? obstacle : target;
-        BlockPos approach = entity.runtimeFindApproachPosition(focus);
-        BlockPos moveTarget = approach != null ? approach : entity.runtimeResolveMovementTarget(focus);
-        if (moveTarget != null && !entity.runtimeIsWithin(moveTarget, 2.56D)) {
-            actions.add(InteractionAction.moveNear(moveTarget, 1.05D, 2.56D, obstacle != null ? "靠近障碍并准备清障" : "靠近资源准备交互"));
+
+        switch (task.state()) {
+            case SEARCH_TARGET -> {
+                BlockPos searchTarget = task.moveTarget() != null ? task.moveTarget() : entity.resolveRuntimeTarget("explore", entity.blockPosition());
+                if (searchTarget == null) {
+                    return InteractionPlan.failed(woodTask ? "砍树交互" : "采矿交互", woodTask ? "未找到可采树木" : "未找到可采矿点");
+                }
+                if (!entity.runtimeIsWithin(searchTarget, 2.56D)) {
+                    actions.add(InteractionAction.moveNear(searchTarget, 1.0D, 2.56D, woodTask ? "搜索附近树木" : "搜索附近矿点"));
+                }
+                actions.add(InteractionAction.adjustView(searchTarget, woodTask ? "抬头观察树冠线索" : "观察地形与矿线"));
+                actions.add(InteractionAction.lookAt(searchTarget, woodTask ? "观察树木线索" : "观察矿点线索"));
+                actions.add(InteractionAction.lowerShield("结束搜索防御状态"));
+                return InteractionPlan.of(woodTask ? "搜索树木交互" : "搜索矿点交互", actions);
+            }
+            case MOVE_TO_TARGET -> {
+                BlockPos focus = task.obstacle() != null ? task.obstacle() : task.target();
+                if (focus == null) {
+                    return InteractionPlan.failed(woodTask ? "砍树交互" : "采矿交互", "任务目标丢失");
+                }
+                BlockPos moveTarget = task.moveTarget() != null ? task.moveTarget() : entity.runtimeResolveMovementTarget(focus);
+                if (moveTarget != null && !entity.runtimeIsWithin(moveTarget, 2.56D)) {
+                    actions.add(InteractionAction.moveNear(moveTarget, 1.05D, 2.56D, task.obstacle() != null ? "靠近障碍并准备清障" : "靠近资源准备交互"));
+                }
+                actions.add(InteractionAction.adjustView(focus, task.obstacle() != null ? "调整视角以清障" : "调整视角锁定资源"));
+                actions.add(InteractionAction.lookAt(focus, task.obstacle() != null ? "观察路径障碍" : "观察资源方块"));
+                actions.add(InteractionAction.lowerShield("结束移动防御状态"));
+                return InteractionPlan.of(woodTask ? "靠近采集点交互" : "靠近矿点交互", actions);
+            }
+            case CLEAR_OBSTACLE -> {
+                BlockPos obstacle = task.obstacle();
+                if (obstacle == null) {
+                    return InteractionPlan.success(woodTask ? "砍树交互" : "采矿交互", "障碍已清理");
+                }
+                if (!entity.runtimeCanHarvestFromHere(obstacle)) {
+                    BlockPos moveTarget = task.moveTarget() != null ? task.moveTarget() : entity.runtimeResolveMovementTarget(obstacle);
+                    if (moveTarget != null && !entity.runtimeIsWithin(moveTarget, 2.56D)) {
+                        actions.add(InteractionAction.moveNear(moveTarget, 1.05D, 2.56D, "靠近障碍并准备清障"));
+                    }
+                }
+                actions.add(InteractionAction.adjustView(obstacle, "调整视角以清障"));
+                actions.add(InteractionAction.lookAt(obstacle, "观察路径障碍"));
+                actions.add(InteractionAction.clearPath(obstacle, woodTask, woodTask ? "清理树叶遮挡" : "挖开矿点遮挡"));
+                actions.add(InteractionAction.lowerShield("结束清障防御状态"));
+                return InteractionPlan.of(woodTask ? "清障采木交互" : "清障采矿交互", actions);
+            }
+            case MINE_TARGET -> {
+                BlockPos target = task.target();
+                if (target == null) {
+                    return InteractionPlan.failed(woodTask ? "砍树交互" : "采矿交互", "任务目标丢失");
+                }
+                if (!entity.runtimeCanHarvestFromHere(target)) {
+                    BlockPos moveTarget = task.moveTarget() != null ? task.moveTarget() : entity.runtimeResolveMovementTarget(target);
+                    if (moveTarget != null && !entity.runtimeIsWithin(moveTarget, 2.56D)) {
+                        actions.add(InteractionAction.moveNear(moveTarget, 1.05D, 2.56D, "靠近资源准备采掘"));
+                    }
+                }
+                actions.add(InteractionAction.adjustView(target, "调整视角锁定资源"));
+                actions.add(InteractionAction.lookAt(target, "观察资源方块"));
+                actions.add(InteractionAction.lowerShield("切换到采集动作"));
+                actions.add(InteractionAction.breakTarget(target, woodTask, woodTask ? "砍下树干" : "采掘矿点"));
+                actions.add(InteractionAction.collectDrops("回收掉落物"));
+                actions.add(InteractionAction.lowerShield("结束当前采集防御状态"));
+                return InteractionPlan.of(woodTask ? "砍树交互" : "采矿交互", actions);
+            }
+            case COLLECT_DROPS -> {
+                actions.add(InteractionAction.collectDrops("回收掉落物"));
+                actions.add(InteractionAction.lowerShield("结束回收防御状态"));
+                return InteractionPlan.of(woodTask ? "回收木材掉落物交互" : "回收矿物掉落物交互", actions);
+            }
+            case COMPLETE -> {
+                return InteractionPlan.success(woodTask ? "砍树交互" : "采矿交互", "采集任务阶段完成");
+            }
+            case FAILED -> {
+                return InteractionPlan.failed(woodTask ? "砍树交互" : "采矿交互", "采集任务阶段失败");
+            }
+            case IDLE -> {
+                return InteractionPlan.of(woodTask ? "砍树交互" : "采矿交互", actions);
+            }
         }
-        actions.add(InteractionAction.adjustView(focus, obstacle != null ? "调整视角以清障" : "调整视角锁定资源"));
-        actions.add(InteractionAction.lookAt(focus, obstacle != null ? "观察路径障碍" : "观察资源方块"));
-        if (obstacle != null) {
-            actions.add(InteractionAction.clearPath(obstacle, woodTask, woodTask ? "清理树叶遮挡" : "挖开矿点遮挡"));
-        } else {
-            actions.add(InteractionAction.lowerShield("切换到采集动作"));
-            actions.add(InteractionAction.breakTarget(target, woodTask, woodTask ? "砍下树干" : "采掘矿点"));
-            actions.add(InteractionAction.collectDrops("回收掉落物"));
-        }
-        actions.add(InteractionAction.lowerShield("结束当前采集防御状态"));
-        return InteractionPlan.of(woodTask ? "砍树交互" : "采矿交互", actions);
+        return InteractionPlan.failed(woodTask ? "砍树交互" : "采矿交互", "采集任务状态未知");
     }
 
     private static InteractionPlan buildShelterPlan(AIPlayerEntity entity) {

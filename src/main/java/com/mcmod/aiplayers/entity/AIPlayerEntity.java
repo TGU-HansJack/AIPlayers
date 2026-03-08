@@ -26,6 +26,8 @@ import java.util.UUID;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundEvents;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.util.Mth;
 import net.minecraft.core.BlockPos;
@@ -46,6 +48,8 @@ import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.effect.MobEffectUtil;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.goal.FloatGoal;
@@ -69,6 +73,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CropBlock;
+import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.gamerules.GameRules;
@@ -111,8 +116,11 @@ public class AIPlayerEntity extends Zombie {
     private static final int NAVIGATION_STUCK_THRESHOLD = 60;
     private static final double HARVEST_REACH = 4.5D;
     private static final double RECOVERY_REACH = 3.5D;
+    private static final int HARVEST_TASK_STALE_TICKS = 120;
+    private static final int HARVEST_TASK_LOCK_TICKS = 90;
     private static final double FAST_FOLLOW_SPEED = 1.35D;
     private static final double NORMAL_FOLLOW_SPEED = 1.15D;
+    private static final double OWNER_TELEPORT_FOLLOW_DISTANCE_SQR = 12.0D * 12.0D;
     private static final double FAST_FOLLOW_DISTANCE_SQR = 12.0D * 12.0D;
     private static final double TELEPORT_FOLLOW_DISTANCE_SQR = 32.0D * 32.0D;
     private static final int ALERT_COOLDOWN_TICKS = 120;
@@ -194,7 +202,15 @@ public class AIPlayerEntity extends Zombie {
     private int miningProgressTicks;
     private int miningRequiredTicks;
     private int miningLastTick;
+    private int miningLastStage = -1;
     private String miningObservationPrefix = "";
+    private HarvestTaskState harvestTaskState = HarvestTaskState.IDLE;
+    private boolean harvestTaskWoodMode;
+    private BlockPos harvestTaskTarget;
+    private BlockPos harvestTaskObstacle;
+    private BlockPos harvestTaskMoveTarget;
+    private int harvestTaskStateTick;
+    private int harvestTaskLastProgressTick;
 
     public AIPlayerEntity(EntityType<? extends Zombie> entityType, Level level) {
         super(entityType, level);
@@ -240,6 +256,9 @@ public class AIPlayerEntity extends Zombie {
                 .add(Attributes.MAX_HEALTH, 20.0D)
                 .add(Attributes.MOVEMENT_SPEED, 0.32D)
                 .add(Attributes.ATTACK_DAMAGE, 5.0D)
+                .add(Attributes.BLOCK_BREAK_SPEED)
+                .add(Attributes.SUBMERGED_MINING_SPEED)
+                .add(Attributes.MINING_EFFICIENCY)
                 .add(Attributes.FOLLOW_RANGE, 40.0D);
     }
 
@@ -255,6 +274,30 @@ public class AIPlayerEntity extends Zombie {
     @Override
     protected boolean isSunSensitive() {
         return false;
+    }
+
+    @Override
+    protected SoundEvent getAmbientSound() {
+        return null;
+    }
+
+    @Override
+    protected SoundEvent getHurtSound(DamageSource damageSource) {
+        return SoundEvents.PLAYER_HURT;
+    }
+
+    @Override
+    protected SoundEvent getDeathSound() {
+        return SoundEvents.PLAYER_DEATH;
+    }
+
+    @Override
+    protected void playStepSound(BlockPos pos, BlockState state) {
+        if (state.isAir()) {
+            return;
+        }
+        SoundType soundType = state.getSoundType();
+        this.playSound(soundType.getStepSound(), soundType.getVolume() * 0.15F, soundType.getPitch());
     }
 
     @Override
@@ -360,6 +403,8 @@ public class AIPlayerEntity extends Zombie {
         this.setTarget(null);
         this.getNavigation().stop();
         this.resetNavigationState();
+        this.resetMiningState();
+        this.resetHarvestTaskState();
         this.applyModeEquipment();
         if (normalizedMode != AIPlayerMode.BUILD_SHELTER) {
             this.shelterAnchor = null;
@@ -1033,6 +1078,10 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private void tickNavigationState() {
+        if (this.isMiningLocked()) {
+            this.getNavigation().stop();
+            return;
+        }
         BlockPos movementTarget = this.agentRuntime.movementController().getActiveTargetPos();
         if (movementTarget != null) {
             this.activeNavigationTarget = movementTarget;
@@ -1172,7 +1221,7 @@ public class AIPlayerEntity extends Zombie {
 
     private void performFollow(boolean guardMode) {
         ServerPlayer owner = this.getOwnerPlayer();
-        if (owner == null) {
+        if (owner == null || owner.isRemoved() || owner.isSpectator()) {
             this.setMode(AIPlayerMode.IDLE);
             return;
         }
@@ -1193,7 +1242,8 @@ public class AIPlayerEntity extends Zombie {
 
         double followDistance = guardMode ? 5.0D : 3.0D;
         double ownerDistanceSqr = this.distanceToSqr(owner);
-        if (ownerDistanceSqr >= TELEPORT_FOLLOW_DISTANCE_SQR && this.tryTeleportNearPlayer(owner, "距离过远，已快速跟上主人@")) {
+        if (ownerDistanceSqr >= OWNER_TELEPORT_FOLLOW_DISTANCE_SQR
+                && this.tryTeleportNearOwnerLikeWolf(owner, "距离过远，已快速跟上主人@")) {
             return;
         }
 
@@ -2132,6 +2182,80 @@ public class AIPlayerEntity extends Zombie {
         return false;
     }
 
+    private boolean tryDiggableAdvance(BlockPos targetPos) {
+        if (targetPos == null) {
+            return false;
+        }
+        if (!(this.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        if (!serverLevel.getGameRules().get(GameRules.MOB_GRIEFING)) {
+            return false;
+        }
+
+        // First clear the direct blocker, then try forward/stair candidates.
+        BlockPos blocker = this.findNavigationObstacle(targetPos);
+        if (blocker != null && this.tryDiggableCandidate(blocker, "已挖通路径障碍@")) {
+            return true;
+        }
+
+        BlockPos self = this.blockPosition();
+        Direction facing = this.resolveDigDirection(targetPos);
+        List<BlockPos> candidates = new ArrayList<>();
+        BlockPos front = self.relative(facing);
+        candidates.add(front);
+        candidates.add(front.above());
+        if (targetPos.getY() > self.getY() + 1) {
+            candidates.add(self.above());
+            candidates.add(front.above());
+        }
+        if (targetPos.getY() < self.getY() - 1) {
+            candidates.add(front.below());
+        }
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            candidates.add(self.relative(direction).above());
+        }
+
+        Set<BlockPos> dedupe = new HashSet<>();
+        for (BlockPos candidate : candidates) {
+            if (candidate == null || !dedupe.add(candidate)) {
+                continue;
+            }
+            if (this.tryDiggableCandidate(candidate, "已挖通前方道路@")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean tryDiggableCandidate(BlockPos candidate, String observationPrefix) {
+        if (candidate == null || !this.runtimeCanBreakPathBlock(candidate)) {
+            return false;
+        }
+        if (this.canHarvestFromHere(candidate)) {
+            boolean completed = this.breakAuxiliaryBlock(candidate, observationPrefix);
+            return completed || this.isMiningInProgress(candidate, MiningMode.AUXILIARY);
+        }
+        BlockPos approach = this.findApproachPosition(candidate);
+        if (approach != null && this.tryStartNavigation(approach, FAST_FOLLOW_SPEED)) {
+            this.lastObservation = "前往可挖通路点@" + this.formatPos(candidate);
+            return true;
+        }
+        return false;
+    }
+
+    private Direction resolveDigDirection(BlockPos targetPos) {
+        Vec3 delta = Vec3.atCenterOf(targetPos).subtract(this.position());
+        double horizontal = delta.x * delta.x + delta.z * delta.z;
+        if (horizontal < 1.0E-4D) {
+            return Direction.fromYRot(this.getYRot());
+        }
+        if (Math.abs(delta.x) >= Math.abs(delta.z)) {
+            return delta.x >= 0.0D ? Direction.EAST : Direction.WEST;
+        }
+        return delta.z >= 0.0D ? Direction.SOUTH : Direction.NORTH;
+    }
+
     private boolean tryNavigationRecovery(boolean severe) {
         if (this.attemptImmediateRecovery()) {
             return true;
@@ -2216,6 +2340,43 @@ public class AIPlayerEntity extends Zombie {
         this.resetNavigationState();
         this.lastObservation = observationPrefix + this.formatPos(destination);
         return true;
+    }
+
+    private boolean tryTeleportNearOwnerLikeWolf(ServerPlayer owner, String observationPrefix) {
+        BlockPos ownerPos = owner.blockPosition();
+        for (int attempt = 0; attempt < 10; attempt++) {
+            int offsetX = this.random.nextInt(7) - 3;
+            int offsetY = this.random.nextInt(3) - 1;
+            int offsetZ = this.random.nextInt(7) - 3;
+            if (Math.abs(offsetX) < 2 && Math.abs(offsetZ) < 2) {
+                continue;
+            }
+            BlockPos candidate = ownerPos.offset(offsetX, offsetY, offsetZ);
+            if (!this.canTeleportNearOwner(candidate, ownerPos)) {
+                continue;
+            }
+            this.teleportTo(candidate.getX() + 0.5D, candidate.getY(), candidate.getZ() + 0.5D);
+            this.getNavigation().stop();
+            this.resetNavigationState();
+            this.setForcedLookTarget(owner.getEyePosition(), 10);
+            this.lastObservation = observationPrefix + this.formatPos(candidate);
+            return true;
+        }
+        return this.tryTeleportNearPlayer(owner, observationPrefix);
+    }
+
+    private boolean canTeleportNearOwner(BlockPos candidate, BlockPos ownerPos) {
+        if (candidate == null) {
+            return false;
+        }
+        if (Math.abs(candidate.getX() - ownerPos.getX()) < 2 && Math.abs(candidate.getZ() - ownerPos.getZ()) < 2) {
+            return false;
+        }
+        if (!this.canStandAt(candidate)) {
+            return false;
+        }
+        BlockPos movement = candidate.subtract(this.blockPosition());
+        return this.level().noCollision(this, this.getBoundingBox().move(movement));
     }
 
     private BlockPos findNearbyDryStandPosition(BlockPos center, int horizontalRadius, int verticalRadius) {
@@ -2434,18 +2595,225 @@ public class AIPlayerEntity extends Zombie {
         if (this.miningMode == MiningMode.NONE) {
             return;
         }
-        if (this.miningTarget == null || this.tickCount - this.miningLastTick > 20) {
+        if (this.miningTarget == null || !(this.level() instanceof ServerLevel serverLevel)) {
             this.resetMiningState();
+            return;
         }
+        BlockPos pos = this.miningTarget;
+        BlockState state = serverLevel.getBlockState(pos);
+        if (state.isAir()) {
+            this.resetMiningState();
+            return;
+        }
+        if (state.getDestroySpeed(serverLevel, pos) < 0.0F) {
+            this.resetMiningState();
+            return;
+        }
+        Vec3 center = Vec3.atCenterOf(pos);
+        if (this.distanceToSqr(center) > HARVEST_REACH * HARVEST_REACH || !this.canHarvestFromHere(pos)) {
+            this.resetMiningState();
+            return;
+        }
+        this.getNavigation().stop();
+        this.runtimeClearWasdOverride();
+        this.setZza(0.0F);
+        this.setXxa(0.0F);
+        this.setSpeed(0.0F);
+        this.setSprinting(false);
+        this.facePosition(center);
+
+        this.miningLastTick = this.tickCount;
+        this.miningRequiredTicks = this.computeMiningRequiredTicks(state, pos);
+        if (this.miningMode == MiningMode.HARVEST_WOOD || this.miningMode == MiningMode.HARVEST_ORE) {
+            this.touchHarvestTaskProgress();
+        }
+        this.miningProgressTicks++;
+
+        if (this.tickCount % 5 == 0) {
+            this.swing(InteractionHand.MAIN_HAND);
+        }
+        this.updateMiningProgressVisual(serverLevel, pos);
+
+        if (this.miningProgressTicks < this.miningRequiredTicks) {
+            this.lastObservation = "采掘中 " + this.miningProgressTicks + "/" + this.miningRequiredTicks + " @" + this.formatPos(pos);
+            return;
+        }
+
+        this.finishMiningBlock(serverLevel, pos, state);
     }
 
     private void resetMiningState() {
+        this.clearMiningProgressVisual();
         this.miningTarget = null;
         this.miningMode = MiningMode.NONE;
         this.miningProgressTicks = 0;
         this.miningRequiredTicks = 0;
         this.miningLastTick = 0;
+        this.miningLastStage = -1;
         this.miningObservationPrefix = "";
+    }
+
+    private boolean isMiningInProgress(BlockPos pos, MiningMode mode) {
+        return pos != null && mode != MiningMode.NONE && pos.equals(this.miningTarget) && this.miningMode == mode;
+    }
+
+    private boolean isMiningLocked() {
+        return this.miningMode != MiningMode.NONE && this.miningTarget != null;
+    }
+
+    private void resetHarvestTaskState() {
+        this.harvestTaskState = HarvestTaskState.IDLE;
+        this.harvestTaskTarget = null;
+        this.harvestTaskObstacle = null;
+        this.harvestTaskMoveTarget = null;
+        this.harvestTaskStateTick = this.tickCount;
+        this.harvestTaskLastProgressTick = this.tickCount;
+    }
+
+    private void touchHarvestTaskProgress() {
+        this.harvestTaskLastProgressTick = this.tickCount;
+    }
+
+    private void setHarvestTaskState(HarvestTaskState nextState) {
+        if (nextState == null || this.harvestTaskState == nextState) {
+            return;
+        }
+        this.harvestTaskState = nextState;
+        this.harvestTaskStateTick = this.tickCount;
+    }
+
+    private HarvestTaskView updateHarvestTaskView(boolean woodTask) {
+        // Harvest state machine: SEARCH -> MOVE -> CLEAR -> MINE -> COLLECT.
+        if (this.harvestTaskState == HarvestTaskState.IDLE || this.harvestTaskWoodMode != woodTask) {
+            this.harvestTaskWoodMode = woodTask;
+            this.harvestTaskTarget = null;
+            this.harvestTaskObstacle = null;
+            this.harvestTaskMoveTarget = null;
+            this.setHarvestTaskState(HarvestTaskState.SEARCH_TARGET);
+            this.touchHarvestTaskProgress();
+        }
+
+        if (this.tickCount - this.harvestTaskLastProgressTick > HARVEST_TASK_STALE_TICKS) {
+            this.harvestTaskTarget = null;
+            this.harvestTaskObstacle = null;
+            this.harvestTaskMoveTarget = null;
+            this.setHarvestTaskState(HarvestTaskState.SEARCH_TARGET);
+        }
+
+        BlockPos target = this.resolveHarvestTarget(woodTask, woodTask ? this.rememberedLog : this.rememberedOre);
+        if (woodTask) {
+            this.rememberedLog = target;
+        } else {
+            this.rememberedOre = target;
+        }
+
+        if (target == null || !this.isValidHarvestTarget(target, woodTask)) {
+            this.harvestTaskTarget = null;
+            this.harvestTaskObstacle = null;
+            this.harvestTaskMoveTarget = this.resolveRuntimeTarget("explore", this.blockPosition());
+            this.setHarvestTaskState(HarvestTaskState.SEARCH_TARGET);
+            return new HarvestTaskView(this.harvestTaskState, woodTask, null, null, this.harvestTaskMoveTarget);
+        }
+
+        if (!target.equals(this.harvestTaskTarget)) {
+            this.harvestTaskTarget = target.immutable();
+            this.setHarvestTaskState(HarvestTaskState.MOVE_TO_TARGET);
+            this.touchHarvestTaskProgress();
+        }
+
+        BlockPos obstacle = this.findHarvestObstacle(this.harvestTaskTarget, woodTask);
+        BlockPos focus = obstacle != null ? obstacle : this.harvestTaskTarget;
+        BlockPos approach = this.findApproachPosition(focus);
+        BlockPos moveTarget = approach != null ? approach : this.runtimeResolveMovementTarget(focus);
+
+        this.harvestTaskObstacle = obstacle == null ? null : obstacle.immutable();
+        this.harvestTaskMoveTarget = moveTarget == null ? null : moveTarget.immutable();
+
+        if (this.harvestTaskState == HarvestTaskState.IDLE || this.harvestTaskState == HarvestTaskState.SEARCH_TARGET) {
+            this.setHarvestTaskState(HarvestTaskState.MOVE_TO_TARGET);
+        }
+
+        switch (this.harvestTaskState) {
+            case MOVE_TO_TARGET -> {
+                if (obstacle != null && this.canHarvestFromHere(obstacle)) {
+                    this.setHarvestTaskState(HarvestTaskState.CLEAR_OBSTACLE);
+                } else if (obstacle == null && this.canHarvestFromHere(this.harvestTaskTarget)) {
+                    this.setHarvestTaskState(HarvestTaskState.MINE_TARGET);
+                }
+            }
+            case CLEAR_OBSTACLE -> {
+                if (obstacle == null) {
+                    this.setHarvestTaskState(HarvestTaskState.MINE_TARGET);
+                } else if (!this.canHarvestFromHere(obstacle)) {
+                    this.setHarvestTaskState(HarvestTaskState.MOVE_TO_TARGET);
+                }
+            }
+            case MINE_TARGET -> {
+                if (!this.isValidHarvestTarget(this.harvestTaskTarget, woodTask)) {
+                    BlockPos next = this.findConnectedHarvestTarget(this.harvestTaskTarget, woodTask);
+                    if (next != null && this.isValidHarvestTarget(next, woodTask)) {
+                        this.harvestTaskTarget = next.immutable();
+                        if (woodTask) {
+                            this.rememberedLog = next;
+                        } else {
+                            this.rememberedOre = next;
+                        }
+                        this.setHarvestTaskState(HarvestTaskState.MOVE_TO_TARGET);
+                        this.touchHarvestTaskProgress();
+                    } else {
+                        this.setHarvestTaskState(HarvestTaskState.COLLECT_DROPS);
+                    }
+                } else if (obstacle != null) {
+                    this.setHarvestTaskState(HarvestTaskState.CLEAR_OBSTACLE);
+                } else if (!this.canHarvestFromHere(this.harvestTaskTarget)) {
+                    this.setHarvestTaskState(HarvestTaskState.MOVE_TO_TARGET);
+                }
+            }
+            case COLLECT_DROPS -> {
+                if (this.observedDrop == null || !this.observedDrop.isAlive()) {
+                    BlockPos next = this.findConnectedHarvestTarget(this.harvestTaskTarget, woodTask);
+                    if (next != null && this.isValidHarvestTarget(next, woodTask)) {
+                        this.harvestTaskTarget = next.immutable();
+                        if (woodTask) {
+                            this.rememberedLog = next;
+                        } else {
+                            this.rememberedOre = next;
+                        }
+                        this.setHarvestTaskState(HarvestTaskState.MOVE_TO_TARGET);
+                        this.touchHarvestTaskProgress();
+                    } else {
+                        this.harvestTaskTarget = null;
+                        this.setHarvestTaskState(HarvestTaskState.SEARCH_TARGET);
+                    }
+                }
+            }
+            case COMPLETE, FAILED, IDLE, SEARCH_TARGET -> {
+            }
+        }
+
+        return new HarvestTaskView(
+                this.harvestTaskState,
+                woodTask,
+                this.harvestTaskTarget,
+                this.harvestTaskObstacle,
+                this.harvestTaskMoveTarget);
+    }
+
+    private AgentGoal getHarvestTaskLockGoal() {
+        if (this.harvestTaskState == HarvestTaskState.IDLE || this.harvestTaskState == HarvestTaskState.SEARCH_TARGET) {
+            return null;
+        }
+        if (this.tickCount - this.harvestTaskLastProgressTick > HARVEST_TASK_LOCK_TICKS) {
+            return null;
+        }
+        if (this.isInLava() || this.isOnFire()) {
+            return null;
+        }
+        if (this.observedHostile != null && this.observedHostile.isAlive() && this.distanceToSqr(this.observedHostile) <= 49.0D) {
+            return null;
+        }
+        GoalType goalType = this.harvestTaskWoodMode ? GoalType.COLLECT_WOOD : GoalType.COLLECT_ORE;
+        return AgentGoal.of(goalType, "task-lock", "采集任务状态机锁定，避免被跟随/探索打断");
     }
 
     private boolean mineBlockTick(BlockPos pos, MiningMode mode, String observationPrefix) {
@@ -2470,39 +2838,126 @@ public class AIPlayerEntity extends Zombie {
             return false;
         }
 
+        if (this.isMiningLocked() && !this.isMiningInProgress(pos, mode)) {
+            return false;
+        }
+
         Vec3 center = Vec3.atCenterOf(pos);
         if (this.distanceToSqr(center) > HARVEST_REACH * HARVEST_REACH || !this.canHarvestFromHere(pos)) {
             return false;
         }
 
         if (!pos.equals(this.miningTarget) || this.miningMode != mode) {
+            this.clearMiningProgressVisual();
             this.miningTarget = pos.immutable();
             this.miningMode = mode;
             this.miningObservationPrefix = observationPrefix == null ? "" : observationPrefix;
             this.miningProgressTicks = 0;
             this.miningRequiredTicks = this.computeMiningRequiredTicks(state, pos);
+            this.miningLastTick = this.tickCount;
+            if (mode == MiningMode.HARVEST_WOOD || mode == MiningMode.HARVEST_ORE) {
+                this.touchHarvestTaskProgress();
+            }
         }
+        return false;
+    }
 
-        if (this.tickCount == this.miningLastTick) {
-            return false;
+    private int computeMiningRequiredTicks(BlockState state, BlockPos pos) {
+        float hardness = state.getDestroySpeed(this.level(), pos);
+        if (hardness < 0.0F) {
+            return Integer.MAX_VALUE;
         }
-        this.miningLastTick = this.tickCount;
-        this.miningProgressTicks++;
-
-        this.facePosition(center);
-        this.swing(InteractionHand.MAIN_HAND);
-
-        if (this.miningProgressTicks < this.miningRequiredTicks) {
-            this.lastObservation = "采掘中 " + this.miningProgressTicks + "/" + this.miningRequiredTicks + " @" + this.formatPos(pos);
-            return false;
+        if (hardness == 0.0F) {
+            return 1;
         }
+        float destroySpeed = Math.max(0.0F, this.getVanillaLikeDestroySpeed(state, pos));
+        boolean correctTool = this.canHarvestDrops(state);
+        float divisor = correctTool ? 30.0F : 100.0F;
+        float progressPerTick = destroySpeed / hardness / divisor;
+        if (progressPerTick <= 0.0F) {
+            return Integer.MAX_VALUE;
+        }
+        return Mth.clamp(Mth.ceil(1.0F / progressPerTick), 1, 4096);
+    }
 
+    private float getVanillaLikeDestroySpeed(BlockState state, BlockPos pos) {
+        float speed = this.getMainHandItem().getDestroySpeed(state);
+        if (speed > 1.0F) {
+            speed += (float)this.getAttributeValue(Attributes.MINING_EFFICIENCY);
+        }
+        if (MobEffectUtil.hasDigSpeed(this)) {
+            speed *= 1.0F + (MobEffectUtil.getDigSpeedAmplification(this) + 1) * 0.2F;
+        }
+        if (this.hasEffect(MobEffects.MINING_FATIGUE)) {
+            int amplifier = this.getEffect(MobEffects.MINING_FATIGUE).getAmplifier();
+            float fatigueMultiplier = switch (amplifier) {
+                case 0 -> 0.3F;
+                case 1 -> 0.09F;
+                case 2 -> 0.0027F;
+                default -> 0.00081F;
+            };
+            speed *= fatigueMultiplier;
+        }
+        speed *= this.getAttributeMultiplier(Attributes.BLOCK_BREAK_SPEED, 1.0F);
+        if (this.isEyeInFluid(FluidTags.WATER)) {
+            speed *= this.getAttributeMultiplier(Attributes.SUBMERGED_MINING_SPEED, 0.2F);
+        }
+        if (!this.onGround()) {
+            speed /= 5.0F;
+        }
+        return Math.max(0.0F, speed);
+    }
+
+    private float getAttributeMultiplier(net.minecraft.core.Holder<net.minecraft.world.entity.ai.attributes.Attribute> attribute, float fallback) {
+        var instance = this.getAttribute(attribute);
+        return instance == null ? fallback : (float)instance.getValue();
+    }
+
+    private boolean canHarvestDrops(BlockState state) {
+        return !state.requiresCorrectToolForDrops() || this.getMainHandItem().isCorrectToolForDrops(state);
+    }
+
+    private void updateMiningProgressVisual(ServerLevel serverLevel, BlockPos pos) {
+        if (this.miningRequiredTicks <= 0) {
+            return;
+        }
+        int stage = Mth.clamp((int)((long)this.miningProgressTicks * 10L / this.miningRequiredTicks), 0, 9);
+        if (stage == this.miningLastStage) {
+            return;
+        }
+        serverLevel.destroyBlockProgress(this.getId(), pos, stage);
+        this.miningLastStage = stage;
+    }
+
+    private void clearMiningProgressVisual() {
+        if (this.miningLastStage < 0 || this.miningTarget == null || !(this.level() instanceof ServerLevel serverLevel)) {
+            return;
+        }
+        serverLevel.destroyBlockProgress(this.getId(), this.miningTarget, -1);
+        this.miningLastStage = -1;
+    }
+
+    private void finishMiningBlock(ServerLevel serverLevel, BlockPos pos, BlockState state) {
         BlockEntity blockEntity = serverLevel.getBlockEntity(pos);
-        ItemStack tool = this.getMainHandItem().copy();
-        List<ItemStack> drops = Block.getDrops(state, serverLevel, pos, blockEntity, this, tool);
+        ItemStack heldTool = this.getMainHandItem();
+        ItemStack toolSnapshot = heldTool.copy();
+        boolean canHarvest = this.canHarvestDrops(state);
+        List<ItemStack> drops = canHarvest ? Block.getDrops(state, serverLevel, pos, blockEntity, this, toolSnapshot) : List.of();
+
+        this.clearMiningProgressVisual();
         serverLevel.levelEvent(2001, pos, Block.getId(state));
-        serverLevel.setBlock(pos, Blocks.AIR.defaultBlockState(), 3);
+        BlockState replacement = serverLevel.getFluidState(pos).createLegacyBlock();
+        if (!serverLevel.setBlock(pos, replacement, 3)) {
+            this.resetMiningState();
+            return;
+        }
+
+        state.getBlock().destroy(serverLevel, pos, state);
         WorldScanner.invalidateAt(serverLevel, pos);
+
+        if (!heldTool.isEmpty()) {
+            heldTool.getItem().mineBlock(heldTool, serverLevel, state, pos, this);
+        }
 
         for (ItemStack stack : drops) {
             ItemStack remainder = this.storeInBackpack(stack.copy());
@@ -2515,6 +2970,7 @@ public class AIPlayerEntity extends Zombie {
             TeamKnowledge.forgetResourceNear(this, this.miningMode == MiningMode.HARVEST_WOOD ? ResourceType.WOOD : ResourceType.ORE, pos, 9.0D);
             this.lastObservation = this.miningObservationPrefix + this.formatPos(pos);
             this.remember("资源", this.lastObservation);
+            this.touchHarvestTaskProgress();
             this.reportTaskProgress(this.activeTaskName, this.miningMode == MiningMode.HARVEST_WOOD
                     ? "已采集木头：" + this.formatPos(pos)
                     : "已采集矿石：" + this.formatPos(pos));
@@ -2522,20 +2978,8 @@ public class AIPlayerEntity extends Zombie {
             this.lastObservation = this.miningObservationPrefix + this.formatPos(pos);
             this.remember("路径", this.lastObservation);
         }
-        this.resetMiningState();
-        return true;
-    }
 
-    private int computeMiningRequiredTicks(BlockState state, BlockPos pos) {
-        float hardness = state.getDestroySpeed(this.level(), pos);
-        if (hardness < 0.0F) {
-            return Integer.MAX_VALUE;
-        }
-        int base = Mth.ceil((hardness + 0.3F) * 10.0F);
-        if (this.getMainHandItem().isCorrectToolForDrops(state)) {
-            base = Math.max(4, (int) Math.floor(base * 0.65D));
-        }
-        return Mth.clamp(base, 4, 80);
+        this.resetMiningState();
     }
 
     private boolean tryCraftBread() {
@@ -4221,6 +4665,14 @@ public class AIPlayerEntity extends Zombie {
         return this.attemptImmediateRecovery();
     }
 
+    boolean runtimeIsMiningLocked() {
+        return this.isMiningLocked();
+    }
+
+    boolean runtimeTryDiggableAdvance(BlockPos targetPos) {
+        return this.tryDiggableAdvance(targetPos);
+    }
+
     void runtimeLookAt(Vec3 target, int ticks) {
         this.setForcedLookTarget(target, ticks);
     }
@@ -4230,13 +4682,15 @@ public class AIPlayerEntity extends Zombie {
     }
 
     BlockPos runtimeResolveHarvestTarget(boolean woodTask) {
-        BlockPos target = this.resolveHarvestTarget(woodTask, woodTask ? this.rememberedLog : this.rememberedOre);
-        if (woodTask) {
-            this.rememberedLog = target;
-        } else {
-            this.rememberedOre = target;
-        }
-        return target;
+        return this.updateHarvestTaskView(woodTask).target();
+    }
+
+    HarvestTaskView runtimeBuildHarvestTaskView(boolean woodTask) {
+        return this.updateHarvestTaskView(woodTask);
+    }
+
+    AgentGoal runtimeHarvestTaskLockGoal() {
+        return this.getHarvestTaskLockGoal();
     }
 
     BlockPos runtimeFindHarvestObstacle(BlockPos target, boolean woodTask) {
@@ -4263,7 +4717,15 @@ public class AIPlayerEntity extends Zombie {
     }
 
     boolean runtimeBreakPathBlock(BlockPos pos, boolean woodTask) {
-        return this.breakAuxiliaryBlock(pos, woodTask ? "已清理树叶@" : "已清理路径障碍@");
+        boolean cleared = this.breakAuxiliaryBlock(pos, woodTask ? "已清理树叶@" : "已清理路径障碍@");
+        if (cleared) {
+            this.touchHarvestTaskProgress();
+            if (this.harvestTaskState == HarvestTaskState.CLEAR_OBSTACLE) {
+                this.setHarvestTaskState(HarvestTaskState.MOVE_TO_TARGET);
+            }
+            return true;
+        }
+        return false;
     }
 
     boolean runtimeHarvestTarget(BlockPos pos, boolean woodTask) {
@@ -4271,11 +4733,21 @@ public class AIPlayerEntity extends Zombie {
         if (!harvested) {
             return false;
         }
+        this.touchHarvestTaskProgress();
         BlockPos nextTarget = this.findConnectedHarvestTarget(pos, woodTask);
         if (woodTask) {
             this.rememberedLog = nextTarget;
         } else {
             this.rememberedOre = nextTarget;
+        }
+        if (nextTarget != null && this.isValidHarvestTarget(nextTarget, woodTask)) {
+            this.harvestTaskTarget = nextTarget.immutable();
+            this.setHarvestTaskState(HarvestTaskState.MOVE_TO_TARGET);
+        } else {
+            this.harvestTaskTarget = null;
+            this.harvestTaskObstacle = null;
+            this.harvestTaskMoveTarget = null;
+            this.setHarvestTaskState(HarvestTaskState.COLLECT_DROPS);
         }
         this.scanSurroundings();
         return true;
@@ -4331,7 +4803,15 @@ public class AIPlayerEntity extends Zombie {
     }
 
     boolean runtimeCollectNearbyDrops() {
-        return this.autoCollectNearbyDrops();
+        boolean collected = this.autoCollectNearbyDrops();
+        if (collected && this.harvestTaskState == HarvestTaskState.COLLECT_DROPS) {
+            this.touchHarvestTaskProgress();
+        }
+        if (this.harvestTaskState == HarvestTaskState.COLLECT_DROPS
+                && (this.observedDrop == null || !this.observedDrop.isAlive())) {
+            this.setHarvestTaskState(HarvestTaskState.SEARCH_TARGET);
+        }
+        return collected;
     }
 
     boolean runtimeCraftBasicTools() {
@@ -4726,6 +5206,25 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private record DeliveryRequest(String label, boolean deliverAll, int requestedCount, Predicate<ItemStack> matcher) {
+    }
+
+    static record HarvestTaskView(
+            HarvestTaskState state,
+            boolean woodTask,
+            BlockPos target,
+            BlockPos obstacle,
+            BlockPos moveTarget) {
+    }
+
+    enum HarvestTaskState {
+        IDLE,
+        SEARCH_TARGET,
+        MOVE_TO_TARGET,
+        CLEAR_OBSTACLE,
+        MINE_TARGET,
+        COLLECT_DROPS,
+        COMPLETE,
+        FAILED
     }
 
     private enum MiningMode {

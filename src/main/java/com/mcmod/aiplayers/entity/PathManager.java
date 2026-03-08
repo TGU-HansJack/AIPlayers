@@ -24,6 +24,7 @@ final class PathManager {
     private static final double WAYPOINT_ADVANCE_Y_ABS = 1.1D;
     private static final int NODE_ACTION_COOLDOWN_TICKS = 6;
     private static final int RECOVERY_JUMP_COOLDOWN_TICKS = 14;
+    private static final int DIGGABLE_RETRY_COOLDOWN_TICKS = 8;
 
     private final AIPlayerEntity entity;
     private final PathCooldown pathCooldown = new PathCooldown(PATH_REPLAN_COOLDOWN_TICKS, REPLAN_BACKOFF_TICKS);
@@ -43,6 +44,7 @@ final class PathManager {
     private long activePathStartTick;
     private long lastNodeActionTick;
     private long lastRecoveryJumpTick;
+    private long lastDiggableAttemptTick;
 
     PathManager(AIPlayerEntity entity) {
         this.entity = entity;
@@ -113,6 +115,7 @@ final class PathManager {
         this.activePathStartTick = 0L;
         this.lastNodeActionTick = 0L;
         this.lastRecoveryJumpTick = 0L;
+        this.lastDiggableAttemptTick = 0L;
         this.pathCooldown.clear();
         this.stuckDetector.clear();
         this.entity.runtimeClearWasdOverride();
@@ -124,6 +127,11 @@ final class PathManager {
 
     void tick() {
         if (this.targetPos == null) {
+            return;
+        }
+        if (this.entity.runtimeIsMiningLocked()) {
+            this.pathState = PathState.STUCK;
+            this.pathStatus = "采掘锁定：暂停导航";
             return;
         }
         long gameTime = this.entity.level().getGameTime();
@@ -142,6 +150,9 @@ final class PathManager {
         if (this.activePath.isEmpty()) {
             boolean requested = this.requestPathTo(this.targetPos, this.speedModifier);
             if (this.activePath.isEmpty()) {
+                if (this.tryDiggableAdvance(gameTime, "路径缺失，尝试挖掘开路")) {
+                    return;
+                }
                 this.pathStatus = requested ? "无可用路径，切换直控逼近" : this.pathStatus;
                 driveDirectFallback(gameTime);
                 return;
@@ -153,6 +164,9 @@ final class PathManager {
             this.pathIndex = 0;
             this.pathState = PathState.REPATH;
             this.pathStatus = "路径节点耗尽，准备重算";
+            if (this.tryDiggableAdvance(gameTime, "路径节点耗尽，尝试挖掘续航")) {
+                return;
+            }
             driveDirectFallback(gameTime);
             return;
         }
@@ -254,6 +268,7 @@ final class PathManager {
         this.activePathStartTick = 0L;
         this.lastNodeActionTick = 0L;
         this.lastRecoveryJumpTick = 0L;
+        this.lastDiggableAttemptTick = 0L;
         this.stuckDetector.clear();
         this.entity.runtimeClearWasdOverride();
         this.entity.setZza(0.0F);
@@ -335,6 +350,10 @@ final class PathManager {
 
         this.pathStatus = "局部避障中";
         this.pathState = PathState.STUCK;
+        if (sample.stuckTicks() >= LOCAL_RECOVERY_TICKS + STUCK_CHECK_INTERVAL_TICKS
+                && this.tryDiggableAdvance(gameTime, "局部卡死，切换挖掘脱困")) {
+            return;
+        }
         boolean climbNeeded = waypoint != null && waypoint.y > this.entity.getY() + 0.45D;
         if (this.entity.onGround()
                 && !this.entity.runtimeHasLowCeiling()
@@ -493,6 +512,22 @@ final class PathManager {
             this.pathStatus = "检测到原地转圈，等待重算路径";
         }
         this.stuckDetector.setStuckAtLeast(LOCAL_RECOVERY_TICKS);
+    }
+
+    private boolean tryDiggableAdvance(long gameTime, String statusMessage) {
+        if (this.targetPos == null) {
+            return false;
+        }
+        if (gameTime - this.lastDiggableAttemptTick < DIGGABLE_RETRY_COOLDOWN_TICKS) {
+            return false;
+        }
+        this.lastDiggableAttemptTick = gameTime;
+        if (!this.entity.runtimeTryDiggableAdvance(this.targetPos)) {
+            return false;
+        }
+        this.pathState = PathState.STUCK;
+        this.pathStatus = statusMessage;
+        return true;
     }
 
     private boolean isNearWaypoint(Vec3 waypoint, double maxXzDistanceSqr, double maxYAbs) {

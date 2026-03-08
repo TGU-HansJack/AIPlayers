@@ -63,6 +63,9 @@ public final class InteractionExecutor {
     }
 
     private static ActionExecutionResult executeMove(AIPlayerEntity entity, InteractionAction action) {
+        if (entity.runtimeIsMiningLocked()) {
+            return ActionExecutionResult.RUNNING;
+        }
         BlockPos target = action.targetPos();
         if (target == null) {
             return ActionExecutionResult.FAILED;
@@ -75,7 +78,9 @@ public final class InteractionExecutor {
             BlockPos resolved = entity.runtimeResolveMovementTarget(target);
             if (resolved != null) {
                 entity.runtimeNavigateToPosition(resolved, action.speed());
+                entity.runtimeTryDiggableAdvance(resolved);
             } else {
+                entity.runtimeTryDiggableAdvance(target);
                 entity.runtimeAttemptImmediateRecovery();
             }
             return ActionExecutionResult.RUNNING;
@@ -112,10 +117,12 @@ public final class InteractionExecutor {
             BlockPos approach = entity.runtimeFindApproachPosition(target);
             BlockPos moveTarget = approach != null ? approach : entity.runtimeResolveMovementTarget(target);
             if (moveTarget == null) {
+                entity.runtimeTryDiggableAdvance(target);
                 entity.runtimeAttemptImmediateRecovery();
                 return ActionExecutionResult.RUNNING;
             }
             if (!entity.runtimeNavigateToPosition(moveTarget, action.speed())) {
+                entity.runtimeTryDiggableAdvance(target);
                 entity.runtimeAttemptImmediateRecovery();
                 return ActionExecutionResult.RUNNING;
             }
@@ -144,10 +151,12 @@ public final class InteractionExecutor {
             BlockPos approach = entity.runtimeFindApproachPosition(focus);
             BlockPos moveTarget = approach != null ? approach : entity.runtimeResolveMovementTarget(focus);
             if (moveTarget == null) {
+                entity.runtimeTryDiggableAdvance(focus);
                 entity.runtimeAttemptImmediateRecovery();
                 return ActionExecutionResult.RUNNING;
             }
             if (!entity.runtimeNavigateToPosition(moveTarget, action.speed())) {
+                entity.runtimeTryDiggableAdvance(focus);
                 entity.runtimeAttemptImmediateRecovery();
                 return ActionExecutionResult.RUNNING;
             }

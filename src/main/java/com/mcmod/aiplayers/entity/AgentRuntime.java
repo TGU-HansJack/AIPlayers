@@ -46,9 +46,21 @@ final class AgentRuntime {
 
     void tickPlanner() {
         WorldStateSnapshot state = this.entity.captureWorldStateSnapshot();
-        AgentGoal localGoal = GoalSelector.select(this.entity, state, this.memory);
+        AgentGoal lockedHarvestGoal = this.entity.runtimeHarvestTaskLockGoal();
+        AgentGoal localGoal = lockedHarvestGoal != null ? lockedHarvestGoal : GoalSelector.select(this.entity, state, this.memory);
         maybeRequestLlmGoal(localGoal);
-        AgentGoal chosenGoal = this.directedGoal != null ? this.directedGoal : (this.llmGoal != null ? this.llmGoal : localGoal);
+        AgentGoal llmCandidate = this.llmGoal;
+        if (lockedHarvestGoal != null
+                && this.directedGoal == null
+                && llmCandidate != null
+                && llmCandidate.type() != lockedHarvestGoal.type()
+                && llmCandidate.type() != GoalType.RECOVER_SELF) {
+            llmCandidate = null;
+        }
+        AgentGoal chosenGoal = this.directedGoal != null ? this.directedGoal : (llmCandidate != null ? llmCandidate : localGoal);
+        if (lockedHarvestGoal != null && this.directedGoal == null && chosenGoal.type() == lockedHarvestGoal.type()) {
+            this.plannerStatus = "采集任务状态机锁定中";
+        }
         GoalPlan nextPlan = GOAPPlanner.plan(chosenGoal, state);
         if (this.forceReplan || !nextPlan.summary().equals(this.currentPlan.summary())) {
             this.currentGoal = chosenGoal;
