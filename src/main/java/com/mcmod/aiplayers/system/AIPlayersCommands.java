@@ -2,6 +2,7 @@ package com.mcmod.aiplayers.system;
 
 import com.mcmod.aiplayers.ai.AIServiceManager;
 import com.mcmod.aiplayers.entity.AIPlayerAction;
+import com.mcmod.aiplayers.entity.AIControllerHub;
 import com.mcmod.aiplayers.entity.AgentConfigManager;
 import com.mcmod.aiplayers.entity.AIPlayerEntity;
 import com.mcmod.aiplayers.entity.AIPlayerMode;
@@ -17,7 +18,9 @@ import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
 import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -60,6 +63,12 @@ public final class AIPlayersCommands {
                                 .then(Commands.argument("animal", StringArgumentType.greedyString())
                                         .suggests(AIPlayersCommands::suggestHuntTargets)
                                         .executes(AIPlayersCommands::huntTargets))))
+                .then(Commands.literal("controller")
+                        .then(Commands.argument("controller", StringArgumentType.word())
+                                .then(Commands.argument("action", StringArgumentType.word())
+                                        .executes(AIPlayersCommands::controllerNearestOwned)
+                                        .then(Commands.argument("args", StringArgumentType.greedyString())
+                                                .executes(AIPlayersCommands::controllerNearestOwned)))))
                 .then(Commands.literal("status")
                         .then(Commands.argument("target", EntityArgument.entity())
                                 .executes(AIPlayersCommands::status)))
@@ -195,6 +204,33 @@ public final class AIPlayersCommands {
         return 1;
     }
 
+    private static int controllerNearestOwned(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        ServerPlayer commander = context.getSource().getPlayerOrException();
+        String controller = StringArgumentType.getString(context, "controller");
+        String action = StringArgumentType.getString(context, "action");
+        String rawArgs = readOptionalStringArg(context, "args");
+        Map<String, String> parsedArgs = parseControllerArgs(rawArgs);
+
+        AIPlayerEntity nearest = commander.level()
+                .getEntitiesOfClass(AIPlayerEntity.class, commander.getBoundingBox().inflate(96.0D), companion -> companion.canReceiveOrdersFrom(commander))
+                .stream()
+                .min((left, right) -> Double.compare(commander.distanceToSqr(left), commander.distanceToSqr(right)))
+                .orElse(null);
+        if (nearest == null) {
+            throw NO_OWNED_AI_PLAYER.create();
+        }
+
+        AIControllerHub.ControllerExecutionResult result = nearest.executeControllerDirective(commander, controller, action, parsedArgs);
+        if (result.success()) {
+            context.getSource().sendSuccess(
+                    () -> Component.literal("控制器执行成功：" + nearest.getAIName() + " -> " + result.message()),
+                    false);
+            return 1;
+        }
+        context.getSource().sendFailure(Component.literal("控制器执行失败：" + nearest.getAIName() + " -> " + result.message()));
+        return 0;
+    }
+
     private static int status(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
         AIPlayerEntity companion = resolveCompanion(context, "target");
         context.getSource().sendSuccess(() -> Component.literal(companion.getStatusSummary()), false);
@@ -281,6 +317,64 @@ public final class AIPlayersCommands {
     private static int knowledgeStatus(CommandContext<CommandSourceStack> context) {
         context.getSource().sendSuccess(() -> Component.literal("知识库状态：" + KnowledgeManager.getStatusSummary()), false);
         return 1;
+    }
+
+    private static String readOptionalStringArg(CommandContext<CommandSourceStack> context, String argName) {
+        try {
+            return StringArgumentType.getString(context, argName);
+        } catch (IllegalArgumentException ignored) {
+            return "";
+        }
+    }
+
+    private static Map<String, String> parseControllerArgs(String rawArgs) {
+        if (rawArgs == null || rawArgs.isBlank()) {
+            return Map.of();
+        }
+        String normalized = rawArgs.trim().replace('，', ',').replace('；', ',').replace(';', ',');
+        Map<String, String> args = new LinkedHashMap<>();
+        if (normalized.contains("=")) {
+            String[] tokens = normalized.split("[,\\s]+");
+            for (String token : tokens) {
+                if (token == null || token.isBlank()) {
+                    continue;
+                }
+                int split = token.indexOf('=');
+                if (split <= 0 || split >= token.length() - 1) {
+                    continue;
+                }
+                String key = token.substring(0, split).trim();
+                String value = token.substring(split + 1).trim();
+                if (!key.isBlank() && !value.isBlank()) {
+                    args.put(key, value);
+                }
+            }
+            return args.isEmpty() ? Map.of() : Map.copyOf(args);
+        }
+        String compact = normalized.replace(" ", ",");
+        String[] pos = compact.split(",");
+        if (pos.length >= 3) {
+            Integer x = parseInteger(pos[0]);
+            Integer y = parseInteger(pos[1]);
+            Integer z = parseInteger(pos[2]);
+            if (x != null && y != null && z != null) {
+                args.put("x", Integer.toString(x));
+                args.put("y", Integer.toString(y));
+                args.put("z", Integer.toString(z));
+            }
+        }
+        return args.isEmpty() ? Map.of() : Map.copyOf(args);
+    }
+
+    private static Integer parseInteger(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     private static AIPlayerEntity resolveCompanion(CommandContext<CommandSourceStack> context, String name) throws CommandSyntaxException {

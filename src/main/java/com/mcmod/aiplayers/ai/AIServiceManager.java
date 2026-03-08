@@ -292,7 +292,8 @@ public final class AIServiceManager {
     }
 
     private static HttpRequest createRequest(JsonObject root, String model, boolean planningRequest) {
-        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(config.url))
+        String endpoint = resolveApiEndpoint(config.url);
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(endpoint))
                 .timeout(Duration.ofMillis(resolveRequestTimeoutMs(model, planningRequest)))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(root), StandardCharsets.UTF_8));
@@ -300,6 +301,24 @@ public final class AIServiceManager {
             builder.header("Authorization", "Bearer " + config.apiKey);
         }
         return builder.build();
+    }
+
+    private static String resolveApiEndpoint(String rawUrl) {
+        if (rawUrl == null || rawUrl.isBlank()) {
+            return DEFAULT_CHAT_URL;
+        }
+        String trimmed = rawUrl.trim();
+        String normalized = trimmed.toLowerCase();
+        if (normalized.endsWith("/chat/completions") || normalized.endsWith("/completions")) {
+            return trimmed;
+        }
+        if (normalized.endsWith("/v1")) {
+            return trimmed + "/chat/completions";
+        }
+        if (normalized.endsWith("/v1/")) {
+            return trimmed + "chat/completions";
+        }
+        return trimmed;
     }
 
     private static CompletableFuture<HttpResponse<String>> sendAsyncWithRetries(HttpClient client, HttpRequest request, String scope) {
@@ -376,10 +395,12 @@ public final class AIServiceManager {
 
     private static String buildConversationSystemPrompt() {
         return "你是 Minecraft 模组中的 AI 玩家同伴。"
-                + "请只返回 JSON，对象字段为 reply、goalType、goalArgs、action。"
+                + "请只返回 JSON，对象字段为 reply、goalType、goalArgs、action，且可选 controller、controllerAction、controllerArgs。"
                 + "reply 是对玩家的简短中文回复。"
                 + "goalType 可选：idle,follow_owner,guard_owner,survive,collect_wood,collect_ore,collect_food,build_shelter,deliver_item,explore_area,recover_self,talk_only。"
                 + "goalArgs 是字符串键值对象；action 可选：none,jump,crouch,stand,look_up,look_down,look_owner。"
+                + "controller 可选：vision,movement,interaction,mining,combat,inventory,building,task。"
+                + "controllerAction 对应控制器动作；controllerArgs 是字符串键值对象。"
                 + "如果只是聊天，请把 goalType 设为空字符串，action 设为 none。"
                 + "不要虚构不存在的物品、地点和能力。";
     }
@@ -397,11 +418,16 @@ public final class AIServiceManager {
         return "玩家消息：" + message + "\n"
                 + "玩家名：" + speaker.getName().getString() + "\n"
                 + "AI 名称：" + companion.getAIName() + "\n"
+                + "AI当前动作：" + companion.getCurrentActionSummary() + "\n"
                 + "状态摘要：" + companion.getStatusSummary() + "\n"
                 + "观察摘要：" + companion.getObservationSummary() + "\n"
+                + "主人完整信息：" + companion.getOwnerDetailedContextForAi() + "\n"
+                + "AI自身完整信息：" + companion.getSelfDetailedContextForAi() + "\n"
+                + "局部20x20x20对象（名称+世界坐标）：" + companion.getLocalWorldObjectsContextForAi() + "\n"
                 + "知识库摘要：" + KnowledgeManager.getStatusSummary() + "\n"
                 + "合成链提示：" + KnowledgeManager.getCraftingHintSummary() + "\n"
                 + "生物弱点提示：" + KnowledgeManager.getMobKnowledgeSummary() + "\n"
+                + "控制器能力：" + companion.getControllerCapabilitySummary() + "\n"
                 + "计划摘要：" + companion.getPlanSummary() + "\n"
                 + "长期记忆：" + companion.getLongTermMemorySummary();
     }
@@ -461,16 +487,12 @@ public final class AIServiceManager {
     private static AIServiceResponse parseConversationResponse(String body) {
         try {
             JsonObject root = JsonParser.parseString(body).getAsJsonObject();
-            JsonArray choices = root.getAsJsonArray("choices");
-            if (choices != null && !choices.isEmpty()) {
-                JsonObject choice = choices.get(0).getAsJsonObject();
-                JsonObject message = choice.getAsJsonObject("message");
-                if (message != null) {
-                    String content = getString(message, "content");
-                    if (content != null && !content.isBlank()) {
-                        return parseAssistantContent(extractJsonCandidate(content));
-                    }
-                }
+            String content = extractAssistantContent(root);
+            if (content != null && !content.isBlank()) {
+                return parseAssistantContent(extractJsonCandidate(content));
+            }
+            if (looksLikeAssistantDirectiveRoot(root)) {
+                return parseAssistantContent(root.toString());
             }
         } catch (RuntimeException ignored) {
         }
@@ -480,35 +502,156 @@ public final class AIServiceManager {
     private static AIGoalPlanResponse parseGoalPlanResponse(String body) {
         try {
             JsonObject root = JsonParser.parseString(body).getAsJsonObject();
-            JsonArray choices = root.getAsJsonArray("choices");
-            if (choices != null && !choices.isEmpty()) {
-                JsonObject choice = choices.get(0).getAsJsonObject();
-                JsonObject message = choice.getAsJsonObject("message");
-                if (message != null) {
-                    String content = getString(message, "content");
-                    if (content != null && !content.isBlank()) {
-                        JsonObject object = JsonParser.parseString(extractJsonCandidate(content)).getAsJsonObject();
-                        return parseGoalPlanObject(object);
-                    }
-                }
+            String content = extractAssistantContent(root);
+            if (content != null && !content.isBlank()) {
+                JsonObject object = JsonParser.parseString(extractJsonCandidate(content)).getAsJsonObject();
+                return parseGoalPlanObject(object);
+            }
+            if (looksLikeGoalPlanRoot(root)) {
+                return parseGoalPlanObject(root);
             }
         } catch (RuntimeException ignored) {
         }
         return null;
     }
 
+    private static String extractAssistantContent(JsonObject root) {
+        if (root == null) {
+            return null;
+        }
+        JsonArray choices = root.getAsJsonArray("choices");
+        if (choices != null && !choices.isEmpty()) {
+            JsonObject choice = choices.get(0).getAsJsonObject();
+            String messageContent = extractMessageContent(choice.get("message"));
+            if (messageContent != null && !messageContent.isBlank()) {
+                return messageContent;
+            }
+            String text = getString(choice, "text");
+            if (text != null && !text.isBlank()) {
+                return text;
+            }
+        }
+        String outputText = getString(root, "output_text");
+        if (outputText != null && !outputText.isBlank()) {
+            return outputText;
+        }
+        return extractMessageContent(root.get("message"));
+    }
+
+    private static String extractMessageContent(JsonElement messageElement) {
+        if (messageElement == null || messageElement.isJsonNull()) {
+            return null;
+        }
+        if (messageElement.isJsonPrimitive()) {
+            try {
+                return messageElement.getAsString();
+            } catch (RuntimeException ignored) {
+                return null;
+            }
+        }
+        if (!messageElement.isJsonObject()) {
+            return null;
+        }
+        JsonObject message = messageElement.getAsJsonObject();
+        JsonElement contentElement = message.get("content");
+        if (contentElement == null || contentElement.isJsonNull()) {
+            return getString(message, "text");
+        }
+        if (contentElement.isJsonPrimitive()) {
+            return contentElement.getAsString();
+        }
+        if (contentElement.isJsonObject()) {
+            JsonObject contentObject = contentElement.getAsJsonObject();
+            String text = getString(contentObject, "text");
+            if (text != null && !text.isBlank()) {
+                return text;
+            }
+            JsonElement inner = contentObject.get("content");
+            if (inner != null && inner.isJsonPrimitive()) {
+                return inner.getAsString();
+            }
+            return null;
+        }
+        if (!contentElement.isJsonArray()) {
+            return null;
+        }
+        StringBuilder merged = new StringBuilder();
+        for (JsonElement entry : contentElement.getAsJsonArray()) {
+            if (entry == null || entry.isJsonNull()) {
+                continue;
+            }
+            String piece = null;
+            if (entry.isJsonPrimitive()) {
+                piece = entry.getAsString();
+            } else if (entry.isJsonObject()) {
+                JsonObject object = entry.getAsJsonObject();
+                piece = firstNonBlank(getString(object, "text"), getString(object, "content"), getString(object, "value"));
+            }
+            if (piece != null && !piece.isBlank()) {
+                if (merged.length() > 0) {
+                    merged.append('\n');
+                }
+                merged.append(piece.trim());
+            }
+        }
+        return merged.length() == 0 ? null : merged.toString();
+    }
+
+    private static boolean looksLikeAssistantDirectiveRoot(JsonObject root) {
+        if (root == null) {
+            return false;
+        }
+        return root.has("reply")
+                || root.has("goalType")
+                || root.has("mode")
+                || root.has("action")
+                || root.has("controller")
+                || root.has("controllerAction")
+                || root.has("controllerArgs")
+                || root.has("controller_args");
+    }
+
+    private static boolean looksLikeGoalPlanRoot(JsonObject root) {
+        if (root == null) {
+            return false;
+        }
+        return root.has("goalType")
+                || root.has("goalArgs")
+                || root.has("priority")
+                || root.has("constraints")
+                || root.has("fallbackGoal")
+                || root.has("speechReply");
+    }
+
     private static AIServiceResponse parseAssistantContent(String content) {
         try {
             JsonObject object = JsonParser.parseString(content).getAsJsonObject();
+            JsonObject controllerArgsObject = firstJsonObject(
+                    object,
+                    "controllerArgs",
+                    "controller_args",
+                    "controllerParams",
+                    "params");
+            String controller = firstNonBlank(
+                    getString(object, "controller"),
+                    getString(object, "controllerType"),
+                    getString(object, "capability"));
+            String controllerAction = firstNonBlank(
+                    getString(object, "controllerAction"),
+                    getString(object, "operation"),
+                    getString(object, "controllerOp"));
             return new AIServiceResponse(
                     defaultString(getString(object, "reply"), ""),
                     defaultString(getString(object, "mode"), "unchanged"),
                     defaultString(getString(object, "goalType"), ""),
                     parseStringMap(object.getAsJsonObject("goalArgs")),
                     defaultString(getString(object, "action"), "none"),
-                    "api");
+                    "api",
+                    defaultString(controller, ""),
+                    defaultString(controllerAction, ""),
+                    parseStringMap(controllerArgsObject));
         } catch (RuntimeException ex) {
-            return new AIServiceResponse(content, "unchanged", "", Map.of(), "none", "api");
+            return new AIServiceResponse(content, "unchanged", "", Map.of(), "none", "api", "", "", Map.of());
         }
     }
 
@@ -579,6 +722,22 @@ public final class AIServiceManager {
         return values;
     }
 
+    private static JsonObject firstJsonObject(JsonObject root, String... keys) {
+        if (root == null || keys == null) {
+            return null;
+        }
+        for (String key : keys) {
+            if (key == null || key.isBlank()) {
+                continue;
+            }
+            JsonElement element = root.get(key);
+            if (element != null && element.isJsonObject()) {
+                return element.getAsJsonObject();
+            }
+        }
+        return null;
+    }
+
     private static int parseInt(JsonElement element, int fallback) {
         try {
             return element == null || element.isJsonNull() ? fallback : element.getAsInt();
@@ -597,6 +756,18 @@ public final class AIServiceManager {
 
     private static String defaultString(String value, String fallback) {
         return value == null || value.isBlank() ? fallback : value;
+    }
+
+    private static String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return null;
     }
 
     private static int resolveRequestTimeoutMs() {

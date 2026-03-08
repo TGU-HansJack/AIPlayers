@@ -31,9 +31,16 @@ public final class InteractionExecutor {
             case MOVE_NEAR -> executeMove(entity, action);
             case LOOK_AT -> executeLook(entity, action);
             case ADJUST_VIEW -> executeAdjustView(entity, action);
-            case EQUIP_TOOL -> entity.runtimePrepareHarvestTool(action.woodTask())
-                    ? ActionExecutionResult.SUCCESS
-                    : ActionExecutionResult.RUNNING;
+            case EQUIP_TOOL -> {
+                if (entity.runtimePrepareHarvestTool(action.woodTask())) {
+                    yield ActionExecutionResult.SUCCESS;
+                }
+                if (entity.runtimeCraftBasicTools()) {
+                    yield ActionExecutionResult.RUNNING;
+                }
+                entity.runtimeRemember("交互", "未找到适配工具，先使用当前主手继续动作");
+                yield ActionExecutionResult.SUCCESS;
+            }
             case RAISE_SHIELD -> entity.runtimeRaiseShieldGuard()
                     ? ActionExecutionResult.SUCCESS
                     : ActionExecutionResult.RUNNING;

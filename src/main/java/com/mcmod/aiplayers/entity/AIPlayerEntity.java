@@ -19,8 +19,8 @@ import com.mcmod.aiplayers.system.ChatIntentParser;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -141,6 +141,12 @@ public class AIPlayerEntity extends PathfinderMob {
     private static final double HUNT_SCAN_RANGE = 28.0D;
     private static final int AWARENESS_BROADCAST_INTERVAL = 20 * 12;
     private static final int DEBUG_STATUS_BROADCAST_INTERVAL = 20 * 3;
+    private static final int CONTROLLER_BRIDGE_DEFAULT_TICKS = 20 * 8;
+    private static final int CONTROLLER_BRIDGE_MAX_TICKS = 20 * 45;
+    private static final int API_CONTEXT_SCAN_HALF_RANGE = 10;
+    private static final int API_CONTEXT_SCAN_VERTICAL_RANGE = 10;
+    private static final int API_CONTEXT_SCAN_MAX_BLOCK_ENTRIES = 120;
+    private static final int API_CONTEXT_SCAN_MAX_ENTITY_ENTRIES = 32;
     private static final int LOCAL_AWARENESS_HALF_RANGE = 10;
     private static final int LOCAL_AWARENESS_VERTICAL_RANGE = 10;
     private static final int LOCAL_AWARENESS_MAX_POINTS_PER_GROUP = 6;
@@ -150,6 +156,7 @@ public class AIPlayerEntity extends PathfinderMob {
     private final NonNullList<ItemStack> backpack = NonNullList.withSize(BACKPACK_SIZE, ItemStack.EMPTY);
     private final List<String> memory = new ArrayList<>();
     private final AgentRuntime agentRuntime;
+    private final AIControllerHub controllerHub;
 
     private AIPlayerMode mode = AIPlayerMode.IDLE;
     private UUID ownerId;
@@ -241,6 +248,8 @@ public class AIPlayerEntity extends PathfinderMob {
     private String localRelativeAwareness = "局部坐标=暂无";
     private int nextAwarenessBroadcastTick;
     private boolean pendingAwarenessBroadcast;
+    private int controllerBridgeTicks;
+    private String controllerBridgeSource = "";
 
     public AIPlayerEntity(EntityType<? extends PathfinderMob> entityType, Level level) {
         super(entityType, level);
@@ -248,6 +257,7 @@ public class AIPlayerEntity extends PathfinderMob {
         this.setCanPickUpLoot(false);
         this.moveControl = new AIPlayerMoveControl(this);
         this.agentRuntime = new AgentRuntime(this);
+        this.controllerHub = new AIControllerHub(this);
         this.getNavigation().setCanFloat(true);
         this.setPathfindingMalus(PathType.WATER, 0.0F);
         this.setPathfindingMalus(PathType.WATER_BORDER, 1.0F);
@@ -375,6 +385,7 @@ public class AIPlayerEntity extends PathfinderMob {
         this.tickActionState();
         this.tickMiningState();
         this.agentRuntime.tickMovement();
+        boolean controllerBridgeActive = this.tickControllerBridgeState();
 
         if (AITickScheduler.shouldRunWorldScan(this.tickCount)) {
             this.agentRuntime.tickWorldScan();
@@ -382,10 +393,10 @@ public class AIPlayerEntity extends PathfinderMob {
         if (AITickScheduler.shouldRunCombat(this.tickCount)) {
             this.agentRuntime.tickCombat();
         }
-        if (AITickScheduler.shouldRunPlanner(this.tickCount)) {
+        if (!controllerBridgeActive && AITickScheduler.shouldRunPlanner(this.tickCount)) {
             this.agentRuntime.tickPlanner();
         }
-        if (AITickScheduler.shouldRunExecutor(this.tickCount)) {
+        if (!controllerBridgeActive && AITickScheduler.shouldRunExecutor(this.tickCount)) {
             this.agentRuntime.tickExecutor();
         }
 
@@ -760,6 +771,145 @@ public class AIPlayerEntity extends PathfinderMob {
                 + (this.hasActiveTaskAiPlan() ? "；任务AI目标=" + this.taskAiGoal : "")
                 + (this.taskAiFallback != null && !this.taskAiFallback.isBlank() ? "；回退=" + this.taskAiFallback : "")
                 + (this.pendingTaskAiPlan ? "；任务AI=重规划中" : "");
+    }
+
+    public String getControllerCapabilitySummary() {
+        return this.controllerHub.capabilitySummary();
+    }
+
+    public String getCurrentActionSummary() {
+        return this.getClientActionSummary();
+    }
+
+    public String getSelfDetailedContextForAi() {
+        BlockPos selfPos = this.blockPosition();
+        String dimension = this.level().dimension().toString();
+        String mainHand = this.getMainHandItem().isEmpty() ? "空手" : this.getMainHandItem().getHoverName().getString() + "x" + this.getMainHandItem().getCount();
+        String offHand = this.getOffhandItem().isEmpty() ? "空" : this.getOffhandItem().getHoverName().getString() + "x" + this.getOffhandItem().getCount();
+        return "名称=" + this.getAIName()
+                + "；UUID=" + this.getUUID()
+                + "；维度=" + dimension
+                + "；坐标=" + this.formatPos(selfPos)
+                + "；精确坐标=" + this.formatPrecisePos(this.getX(), this.getY(), this.getZ())
+                + "；朝向(yaw/pitch)=" + Math.round(this.getYRot()) + "/" + Math.round(this.getXRot())
+                + "；模式=" + this.safeModeDisplayName()
+                + "；当前动作=" + this.getCurrentActionSummary()
+                + "；目标=" + this.latestAgentGoal
+                + "；路径=" + this.agentRuntime.pathStatus()
+                + "；生命=" + Math.round(this.getHealth()) + "/" + Math.round(this.getMaxHealth())
+                + "；移速=" + String.format(Locale.ROOT, "%.3f", this.getDeltaMovement().horizontalDistance())
+                + "；下蹲=" + yesNo(this.isShiftKeyDown())
+                + "；冲刺=" + yesNo(this.isSprinting())
+                + "；着火=" + yesNo(this.isOnFire())
+                + "；液体中=" + yesNo(this.isInWater() || this.isUnderWater() || this.isInLava())
+                + "；主手=" + mainHand
+                + "；副手=" + offHand
+                + "；背包已用=" + this.getUsedBackpackSlots() + "/" + BACKPACK_SIZE
+                + "；观测=" + this.getObservationSummary();
+    }
+
+    public String getOwnerDetailedContextForAi() {
+        ServerPlayer owner = this.getOwnerPlayer();
+        if (owner == null || owner.isRemoved()) {
+            return "主人离线或不可用";
+        }
+        String mainHand = owner.getMainHandItem().isEmpty() ? "空手" : owner.getMainHandItem().getHoverName().getString() + "x" + owner.getMainHandItem().getCount();
+        String offHand = owner.getOffhandItem().isEmpty() ? "空" : owner.getOffhandItem().getHoverName().getString() + "x" + owner.getOffhandItem().getCount();
+        return "名称=" + owner.getName().getString()
+                + "；UUID=" + owner.getUUID()
+                + "；模式=" + this.guessPlayerMode(owner)
+                + "；坐标=" + this.formatPos(owner.blockPosition())
+                + "；精确坐标=" + this.formatPrecisePos(owner.getX(), owner.getY(), owner.getZ())
+                + "；朝向(yaw/pitch)=" + Math.round(owner.getYRot()) + "/" + Math.round(owner.getXRot())
+                + "；生命=" + Math.round(owner.getHealth()) + "/" + Math.round(owner.getMaxHealth())
+                + "；饥饿=" + owner.getFoodData().getFoodLevel()
+                + "；饱和度=" + String.format(Locale.ROOT, "%.1f", owner.getFoodData().getSaturationLevel())
+                + "；护甲值=" + owner.getArmorValue()
+                + "；经验等级=" + owner.experienceLevel
+                + "；总经验=" + owner.totalExperience
+                + "；主手=" + mainHand
+                + "；副手=" + offHand
+                + "；冲刺=" + yesNo(owner.isSprinting())
+                + "；下蹲=" + yesNo(owner.isShiftKeyDown())
+                + "；着火=" + yesNo(owner.isOnFire())
+                + "；液体中=" + yesNo(owner.isInWater() || owner.isUnderWater() || owner.isInLava())
+                + "；状态效果=" + this.describeActiveEffects(owner, 8)
+                + "；与我距离=" + String.format(Locale.ROOT, "%.2f", Math.sqrt(this.distanceToSqr(owner)));
+    }
+
+    public String getLocalWorldObjectsContextForAi() {
+        BlockPos origin = this.blockPosition();
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        List<BlockPos> blockSamples = new ArrayList<>();
+        Map<String, Integer> blockCounts = new LinkedHashMap<>();
+        int nonAirBlocks = 0;
+
+        for (int x = -API_CONTEXT_SCAN_HALF_RANGE; x <= API_CONTEXT_SCAN_HALF_RANGE; x++) {
+            for (int y = -API_CONTEXT_SCAN_VERTICAL_RANGE; y <= API_CONTEXT_SCAN_VERTICAL_RANGE; y++) {
+                for (int z = -API_CONTEXT_SCAN_HALF_RANGE; z <= API_CONTEXT_SCAN_HALF_RANGE; z++) {
+                    cursor.set(origin.getX() + x, origin.getY() + y, origin.getZ() + z);
+                    BlockState state = this.level().getBlockState(cursor);
+                    if (state.isAir()) {
+                        continue;
+                    }
+                    nonAirBlocks++;
+                    Identifier blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock());
+                    String id = blockId == null ? "minecraft:unknown" : blockId.toString();
+                    blockCounts.merge(id, 1, Integer::sum);
+                    blockSamples.add(cursor.immutable());
+                }
+            }
+        }
+
+        blockSamples.sort(Comparator.comparingDouble(pos -> this.distanceToSqr(Vec3.atCenterOf(pos))));
+        List<String> blockEntries = new ArrayList<>();
+        Set<Long> visited = new HashSet<>();
+        for (BlockPos pos : blockSamples) {
+            if (pos == null || !visited.add(pos.asLong())) {
+                continue;
+            }
+            Identifier blockId = BuiltInRegistries.BLOCK.getKey(this.level().getBlockState(pos).getBlock());
+            String id = blockId == null ? "minecraft:unknown" : blockId.toString();
+            blockEntries.add(id + "@" + this.formatPos(pos));
+            if (blockEntries.size() >= API_CONTEXT_SCAN_MAX_BLOCK_ENTRIES) {
+                break;
+            }
+        }
+
+        List<Map.Entry<String, Integer>> topBlocks = new ArrayList<>(blockCounts.entrySet());
+        topBlocks.sort((left, right) -> Integer.compare(right.getValue(), left.getValue()));
+        List<String> topSummaries = new ArrayList<>();
+        for (Map.Entry<String, Integer> entry : topBlocks) {
+            topSummaries.add(entry.getKey() + "x" + entry.getValue());
+            if (topSummaries.size() >= 12) {
+                break;
+            }
+        }
+
+        AABB scanBox = new AABB(origin).inflate(API_CONTEXT_SCAN_HALF_RANGE, API_CONTEXT_SCAN_VERTICAL_RANGE, API_CONTEXT_SCAN_HALF_RANGE);
+        List<ItemEntity> nearbyItems = this.level().getEntitiesOfClass(
+                ItemEntity.class,
+                scanBox,
+                item -> item != null && item.isAlive() && item.getItem() != null && !item.getItem().isEmpty());
+        nearbyItems.sort(Comparator.comparingDouble(this::distanceToSqr));
+        List<String> itemEntries = new ArrayList<>();
+        for (ItemEntity item : nearbyItems) {
+            ItemStack stack = item.getItem();
+            Identifier itemId = BuiltInRegistries.ITEM.getKey(stack.getItem());
+            String id = itemId == null ? stack.getHoverName().getString() : itemId.toString();
+            itemEntries.add(id + "x" + stack.getCount() + "@" + this.formatPos(item.blockPosition()));
+            if (itemEntries.size() >= API_CONTEXT_SCAN_MAX_ENTITY_ENTRIES) {
+                break;
+            }
+        }
+
+        return "扫描范围=20x20x20"
+                + "；AI坐标=" + this.formatPos(origin)
+                + "；当前动作=" + this.getCurrentActionSummary()
+                + "；非空气方块总数=" + nonAirBlocks
+                + "；方块统计Top=" + (topSummaries.isEmpty() ? "无" : String.join(" | ", topSummaries))
+                + "；方块样本(世界坐标)=" + (blockEntries.isEmpty() ? "无" : String.join(" | ", blockEntries))
+                + "；掉落物样本(世界坐标)=" + (itemEntries.isEmpty() ? "无" : String.join(" | ", itemEntries));
     }
 
     private String applyApiDirective(ServerPlayer speaker, AIServiceResponse response) {
@@ -1605,6 +1755,20 @@ public class AIPlayerEntity extends PathfinderMob {
         this.lastNavigationSample = this.position();
         this.activeNavigationSpeed = NORMAL_FOLLOW_SPEED;
         this.agentRuntime.movementController().clear();
+    }
+
+    private boolean tickControllerBridgeState() {
+        if (this.controllerBridgeTicks <= 0) {
+            this.controllerBridgeTicks = 0;
+            return false;
+        }
+        this.controllerBridgeTicks--;
+        if (this.controllerBridgeTicks == 0) {
+            this.controllerBridgeSource = "";
+            this.latestAgentReasoning = "控制器直连结束，恢复规划执行";
+            this.markPersistentDirty();
+        }
+        return true;
     }
 
     private boolean navigateToPosition(BlockPos pos, double speed) {
@@ -2467,10 +2631,17 @@ public class AIPlayerEntity extends PathfinderMob {
 
         if (distanceSqr > 9.0D) {
             BlockPos receiverGoal = this.findWalkablePositionNear(receiver.blockPosition(), 2, 3);
+            boolean navigationStarted;
             if (receiverGoal != null) {
-                this.navigateToPosition(receiverGoal, FAST_FOLLOW_SPEED);
-            } else if (!this.navigateToPosition(receiver.blockPosition(), FAST_FOLLOW_SPEED)) {
+                navigationStarted = this.navigateToPosition(receiverGoal, FAST_FOLLOW_SPEED);
+            } else {
+                navigationStarted = this.navigateToPosition(receiver.blockPosition(), FAST_FOLLOW_SPEED);
+            }
+            if (!navigationStarted) {
                 this.reportTaskFailure(this.activeTaskName, "无法靠近 " + receiver.getName().getString() + " 完成交付");
+                if (distanceSqr >= 49.0D || this.stuckNavigationTicks >= NAVIGATION_STUCK_THRESHOLD / 2) {
+                    this.tryTeleportNearPlayer(receiver, "交付寻路受阻，已瞬移靠近收货人@");
+                }
             }
             this.setForcedLookTarget(receiver.getEyePosition(), 10);
             this.lastObservation = "正在靠近" + receiver.getName().getString() + "并准备交付" + request.label() + "。";
@@ -2488,6 +2659,13 @@ public class AIPlayerEntity extends PathfinderMob {
         int totalGiven = 0;
         for (ItemStack stack : extracted) {
             totalGiven += this.transferStackToPlayer(receiver, stack);
+        }
+        if (totalGiven <= 0) {
+            this.lastObservation = "交付失败：未能转移物品到 " + receiver.getName().getString() + "。";
+            this.reportTaskFailure(this.activeTaskName, "交付失败：未成功转移 " + request.label());
+            this.clearPendingDelivery();
+            this.markPersistentDirty();
+            return false;
         }
 
         this.lastObservation = "已向" + receiver.getName().getString() + "交付 " + totalGiven + " 个" + request.label() + "。";
@@ -2510,7 +2688,7 @@ public class AIPlayerEntity extends PathfinderMob {
         }
 
         String normalized = message.toLowerCase().trim();
-        if (!containsAnyToken(normalized, "给我", "交给我", "给一下", "拿给我", "递给我", "give me", "bring me")) {
+        if (!containsAnyToken(normalized, "给我", "交给我", "给一下", "拿给我", "递给我", "丢给我", "给你", "交付", "deliver", "give me", "bring me")) {
             return null;
         }
 
@@ -2568,7 +2746,51 @@ public class AIPlayerEntity extends PathfinderMob {
         if (containsAnyToken(normalized, "矿物", "矿石", "ore", "minerals")) {
             return new DeliveryRequest("矿物", deliverAll, requestedCount, stack -> this.isOreMaterial(stack.getItem()));
         }
-        return null;
+        return this.parseDynamicDeliveryRequest(normalized, deliverAll, requestedCount);
+    }
+
+    private DeliveryRequest parseDynamicDeliveryRequest(String normalizedMessage, boolean deliverAll, int requestedCount) {
+        if (normalizedMessage == null || normalizedMessage.isBlank()) {
+            return null;
+        }
+        Map<Item, Integer> candidates = new LinkedHashMap<>();
+        for (ItemStack stack : this.backpack) {
+            if (stack == null || stack.isEmpty()) {
+                continue;
+            }
+            candidates.merge(stack.getItem(), stack.getCount(), Integer::sum);
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        Item bestItem = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (Map.Entry<Item, Integer> entry : candidates.entrySet()) {
+            Item item = entry.getKey();
+            Identifier key = BuiltInRegistries.ITEM.getKey(item);
+            String itemId = key == null ? "" : key.getPath().toLowerCase(Locale.ROOT);
+            String itemName = this.getItemDisplayName(item).toLowerCase(Locale.ROOT);
+            int score = 0;
+            if (!itemId.isBlank() && normalizedMessage.contains(itemId)) {
+                score += 8;
+            }
+            if (!itemId.isBlank() && normalizedMessage.contains(itemId.replace('_', ' '))) {
+                score += 6;
+            }
+            if (!itemName.isBlank() && normalizedMessage.contains(itemName)) {
+                score += 7;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                bestItem = item;
+            }
+        }
+        if (bestItem == null || bestScore <= 0) {
+            return null;
+        }
+        Item resolvedItem = bestItem;
+        String label = this.getItemDisplayName(resolvedItem);
+        return new DeliveryRequest(label, deliverAll, requestedCount, stack -> stack != null && !stack.isEmpty() && stack.getItem() == resolvedItem);
     }
 
     private int countMatchingBackpackItems(Predicate<ItemStack> matcher) {
@@ -2616,13 +2838,15 @@ public class AIPlayerEntity extends PathfinderMob {
         ItemStack remaining = stack.copy();
         receiver.getInventory().add(remaining);
         receiver.containerMenu.broadcastChanges();
+        int delivered = Math.max(0, stack.getCount() - remaining.getCount());
         if (!remaining.isEmpty()) {
             ItemEntity itemEntity = new ItemEntity(serverLevel, receiver.getX(), receiver.getY() + 0.5D, receiver.getZ(), remaining.copy());
-            itemEntity.setDefaultPickUpDelay();
+            itemEntity.setNoPickUpDelay();
             itemEntity.setDeltaMovement(receiver.getLookAngle().scale(0.05D).add(0.0D, 0.12D, 0.0D));
             serverLevel.addFreshEntity(itemEntity);
+            delivered += remaining.getCount();
         }
-        return stack.getCount();
+        return delivered;
     }
 
     private int extractRequestedCount(String text) {
@@ -5363,6 +5587,48 @@ public class AIPlayerEntity extends PathfinderMob {
         return pos.getX() + "," + pos.getY() + "," + pos.getZ();
     }
 
+    private String formatPrecisePos(double x, double y, double z) {
+        return String.format(Locale.ROOT, "%.2f,%.2f,%.2f", x, y, z);
+    }
+
+    private String guessPlayerMode(ServerPlayer player) {
+        if (player == null) {
+            return "unknown";
+        }
+        if (player.isSpectator()) {
+            return "spectator";
+        }
+        if (player.isCreative()) {
+            return "creative";
+        }
+        return "survival/adventure";
+    }
+
+    private String describeActiveEffects(LivingEntity entity, int maxEntries) {
+        if (entity == null || entity.getActiveEffects().isEmpty()) {
+            return "无";
+        }
+        List<String> entries = new ArrayList<>();
+        for (var effect : entity.getActiveEffects()) {
+            if (effect == null) {
+                continue;
+            }
+            String effectName = effect.getDescriptionId();
+            if (effectName == null || effectName.isBlank()) {
+                effectName = "unknown_effect";
+            }
+            entries.add(effectName + "(lv" + (effect.getAmplifier() + 1) + "," + effect.getDuration() + "t)");
+            if (entries.size() >= Math.max(1, maxEntries)) {
+                break;
+            }
+        }
+        return entries.isEmpty() ? "无" : String.join(" | ", entries);
+    }
+
+    private String yesNo(boolean value) {
+        return value ? "是" : "否";
+    }
+
     private AIPlayerMode safeMode() {
         if (this.mode == null) {
             this.mode = AIPlayerMode.IDLE;
@@ -5687,8 +5953,83 @@ public class AIPlayerEntity extends PathfinderMob {
         return this.agentRuntime.snapshot();
     }
 
+    public AIControllerHub.ControllerExecutionResult executeControllerDirective(ServerPlayer speaker, String controller, String action, Map<String, String> args) {
+        Map<String, String> safeArgs = args == null ? Map.of() : Map.copyOf(new LinkedHashMap<>(args));
+        AIControllerHub.ControllerExecutionResult result = this.controllerHub.execute(speaker, controller, action, safeArgs);
+        if (result.success()) {
+            this.activateControllerBridgeForCommand(controller, action, safeArgs);
+            this.remember("控制器", (controller == null || controller.isBlank() ? "auto" : controller)
+                    + "."
+                    + (action == null ? "" : action)
+                    + " -> "
+                    + result.message());
+        } else {
+            this.remember("控制器失败", result.message());
+        }
+        this.markPersistentDirty();
+        return result;
+    }
+
+    private void activateControllerBridgeForCommand(String controller, String action, Map<String, String> args) {
+        String controllerKey = controller == null ? "" : controller.trim().toLowerCase(Locale.ROOT);
+        String actionKey = action == null ? "" : action.trim().toLowerCase(Locale.ROOT);
+        if (controllerKey.isBlank()) {
+            controllerKey = switch (actionKey) {
+                case "scan", "all", "scanblocks", "blocks", "scanentities", "entities", "scanhostiles", "hostiles", "scanresources", "resources", "scanstructures", "structures" -> "vision";
+                case "setgoal", "set_goal", "choosetask", "choose_task", "updatetask", "update_task", "canceltask", "cancel_task" -> "task";
+                case "goto", "go_to", "move_to", "follow", "follow_owner", "wander", "explore", "jump", "look", "lookat", "look_at", "input", "set_input", "wasd", "avoidobstacle", "avoid_obstacle", "recover", "stop", "halt" -> "movement";
+                case "opendoor", "open_door", "open", "openchest", "open_chest", "sleepinbed", "sleep_in_bed", "sleep", "pressbutton", "press_button", "useitem", "use_item", "use" -> "interaction";
+                case "mineore", "mine_ore", "choptree", "chop_tree", "mineblock", "mine_block", "cleararea", "clear_area" -> "mining";
+                case "attack", "raiseshield", "raise_shield", "lowershield", "lower_shield", "retreat", "kiteenemy", "kite_enemy" -> "combat";
+                case "equipbesttool", "equip_best_tool", "selectslot", "select_slot", "pickupitem", "pickup_item", "dropitem", "drop_item", "storeinchest", "store_in_chest" -> "inventory";
+                case "placeblock", "place_block", "buildstructure", "build_structure", "buildbridge", "build_bridge", "buildstairs", "build_stairs" -> "building";
+                default -> "";
+            };
+        }
+        if (controllerKey.isBlank() || "vision".equals(controllerKey) || "task".equals(controllerKey)) {
+            return;
+        }
+        if ("stop".equals(actionKey) || "halt".equals(actionKey) || "canceltask".equals(actionKey) || "cancel_task".equals(actionKey)) {
+            return;
+        }
+        int holdTicks = this.parsePositiveControllerTicks(args, "holdTicks");
+        if (holdTicks <= 0) {
+            holdTicks = this.parsePositiveControllerTicks(args, "durationTicks");
+        }
+        if (holdTicks <= 0) {
+            int holdSeconds = this.parsePositiveControllerTicks(args, "holdSeconds");
+            if (holdSeconds <= 0) {
+                holdSeconds = this.parsePositiveControllerTicks(args, "durationSeconds");
+            }
+            if (holdSeconds > 0) {
+                holdTicks = Math.min(20 * 60, holdSeconds * 20);
+            }
+        }
+        this.runtimeActivateControllerBridge(controllerKey + "." + actionKey, holdTicks);
+    }
+
+    private int parsePositiveControllerTicks(Map<String, String> args, String key) {
+        if (args == null || args.isEmpty() || key == null || key.isBlank()) {
+            return -1;
+        }
+        String raw = args.get(key);
+        if (raw == null || raw.isBlank()) {
+            return -1;
+        }
+        try {
+            int value = Integer.parseInt(raw.trim());
+            return value > 0 ? value : -1;
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
+    }
+
     UUID getRuntimeOwnerId() {
         return this.ownerId;
+    }
+
+    AIControllerHub runtimeControllerHub() {
+        return this.controllerHub;
     }
 
     ServerPlayer getRuntimeOwnerPlayer() {
@@ -5850,8 +6191,25 @@ public class AIPlayerEntity extends PathfinderMob {
         this.clearPlayerModePin();
         this.clearTaskAiPlanState();
         this.clearHuntDirective();
+        this.controllerBridgeTicks = 0;
+        this.controllerBridgeSource = "";
         this.agentRuntime.clearDirectedGoal();
         this.setMode(AIPlayerMode.IDLE);
+    }
+
+    void runtimeActivateControllerBridge(String source, int ticks) {
+        int resolvedTicks = ticks <= 0 ? CONTROLLER_BRIDGE_DEFAULT_TICKS : ticks;
+        int clampedTicks = Mth.clamp(resolvedTicks, 20, CONTROLLER_BRIDGE_MAX_TICKS);
+        if (clampedTicks > this.controllerBridgeTicks) {
+            this.controllerBridgeTicks = clampedTicks;
+        }
+        this.controllerBridgeSource = source == null ? "" : source;
+        this.latestAgentReasoning = "控制器直连中：" + (this.controllerBridgeSource.isBlank() ? "external" : this.controllerBridgeSource);
+        this.markPersistentDirty();
+    }
+
+    boolean runtimeControllerBridgeActive() {
+        return this.controllerBridgeTicks > 0;
     }
 
     boolean runtimeHasActiveHuntDirective() {
@@ -6024,7 +6382,13 @@ public class AIPlayerEntity extends PathfinderMob {
                 ? this.findBestToolInBackpack(this::isAxeItem, Items.STONE_AXE)
                 : this.findBestToolInBackpack(this::isPickaxeItem, Items.STONE_PICKAXE);
         if (preferred.isEmpty()) {
-            return false;
+            this.runtimeCraftBasicTools();
+            preferred = woodTask
+                    ? this.findBestToolInBackpack(this::isAxeItem, Items.STONE_AXE)
+                    : this.findBestToolInBackpack(this::isPickaxeItem, Items.STONE_PICKAXE);
+            if (preferred.isEmpty()) {
+                return false;
+            }
         }
         this.setItemSlot(EquipmentSlot.MAINHAND, preferred.copy());
         return true;
