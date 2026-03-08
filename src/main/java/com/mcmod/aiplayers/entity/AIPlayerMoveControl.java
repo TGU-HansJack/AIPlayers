@@ -19,7 +19,6 @@ final class AIPlayerMoveControl extends MoveControl {
     private static final float SPEED_LERP = 0.16F;
     private static final double JUMP_HORIZONTAL_DISTANCE = 1.45D;
     private static final double FRONT_PROBE_DISTANCE = 0.75D;
-    private static final double WATER_ASCENT_SPEED = 0.04D;
     private static final float WALK_SPEED_CAP = 0.14F;
     private static final float SPRINT_SPEED_CAP = 0.18F;
     private static final float SNEAK_SPEED_CAP = 0.05F;
@@ -165,8 +164,7 @@ final class AIPlayerMoveControl extends MoveControl {
             return;
         }
         if (dy > -0.05D || this.companion.horizontalCollision || this.companion.isUnderWater()) {
-            Vec3 motion = this.companion.getDeltaMovement();
-            this.companion.setDeltaMovement(motion.x * 0.9D, Math.max(motion.y, WATER_ASCENT_SPEED), motion.z * 0.9D);
+            this.companion.getJumpControl().jump();
         }
     }
 }

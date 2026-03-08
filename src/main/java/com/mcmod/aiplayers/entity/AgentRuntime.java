@@ -10,7 +10,7 @@ import net.minecraft.server.level.ServerPlayer;
 final class AgentRuntime {
     private final AIPlayerEntity entity;
     private final AgentMemory memory = new AgentMemory();
-    private final PlayerMovementController movementController;
+    private final PathManager movementController;
     private AgentGoal currentGoal = AgentGoal.of(GoalType.IDLE, "boot", "初始化待命");
     private GoalPlan currentPlan = new GoalPlan(this.currentGoal, java.util.List.of(), "初始化", "boot");
     private AgentGoal directedGoal;
@@ -24,10 +24,10 @@ final class AgentRuntime {
 
     AgentRuntime(AIPlayerEntity entity) {
         this.entity = entity;
-        this.movementController = new PlayerMovementController(entity);
+        this.movementController = new PathManager(entity);
     }
 
-    PlayerMovementController movementController() {
+    PathManager movementController() {
         return this.movementController;
     }
 

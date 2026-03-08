@@ -6,6 +6,7 @@ import com.mcmod.aiplayers.entity.AgentConfigManager;
 import com.mcmod.aiplayers.registry.ModEntities;
 import com.mcmod.aiplayers.system.AIPlayersChatHandler;
 import com.mcmod.aiplayers.system.AIPlayersCommands;
+import com.mcmod.aiplayers.system.PathRegressionRunner;
 import com.mojang.logging.LogUtils;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.event.RegisterCommandsEvent;
@@ -35,5 +36,6 @@ public class AIPlayersMod {
 
         RegisterCommandsEvent.BUS.addListener(AIPlayersCommands::register);
         ServerChatEvent.BUS.addListener(AIPlayersChatHandler::onServerChat);
+        PathRegressionRunner.register();
     }
 }

@@ -148,6 +148,7 @@ public class AIPlayerEntity extends Zombie {
     private BlockPos activeNavigationTarget;
     private Vec3 lastNavigationSample = Vec3.ZERO;
     private int stuckNavigationTicks;
+    private double activeNavigationSpeed = NORMAL_FOLLOW_SPEED;
     private String activeBlueprintId = DEFAULT_BLUEPRINT_ID;
     private UUID pendingDeliveryReceiverId;
     private String pendingDeliveryRequest;
@@ -998,8 +999,10 @@ public class AIPlayerEntity extends Zombie {
         if (this.crouchTicks > 0) {
             this.crouchTicks--;
         }
+        boolean navigationInProgress = this.agentRuntime.movementController().isPathActive()
+                && !this.agentRuntime.movementController().isRecovering();
         if (this.lookTicks > 0) {
-            if (this.forcedLookTarget != null) {
+            if (this.forcedLookTarget != null && !navigationInProgress) {
                 this.getLookControl().setLookAt(this.forcedLookTarget);
             }
             this.lookTicks--;
@@ -1023,12 +1026,20 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private void tickNavigationState() {
+        BlockPos movementTarget = this.agentRuntime.movementController().getActiveTargetPos();
+        if (movementTarget != null) {
+            this.activeNavigationTarget = movementTarget;
+        } else if (this.activeNavigationTarget != null && this.agentRuntime.movementController().isIdle()) {
+            this.resetNavigationState();
+            return;
+        }
         if (this.activeNavigationTarget == null) {
             if (this.agentRuntime.movementController().isIdle()) {
                 this.resetNavigationState();
             }
             return;
         }
+        this.ensureVanillaNavigationProgress();
 
         if (this.agentRuntime.movementController().hasReachedTarget(this.activeNavigationTarget)) {
             this.resetNavigationState();
@@ -1066,6 +1077,7 @@ public class AIPlayerEntity extends Zombie {
         this.activeNavigationTarget = null;
         this.stuckNavigationTicks = 0;
         this.lastNavigationSample = this.position();
+        this.activeNavigationSpeed = NORMAL_FOLLOW_SPEED;
         this.agentRuntime.movementController().clear();
     }
 
@@ -1086,14 +1098,29 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private boolean tryStartNavigation(BlockPos pos, double speed) {
-        this.getNavigation().stop();
         boolean started = this.agentRuntime.movementController().requestPathTo(pos, speed);
         if (started) {
-            this.activeNavigationTarget = pos;
+            BlockPos resolvedTarget = this.agentRuntime.movementController().getActiveTargetPos();
+            this.activeNavigationTarget = resolvedTarget != null ? resolvedTarget : pos;
+            this.activeNavigationSpeed = speed;
             this.stuckNavigationTicks = 0;
             this.lastNavigationSample = this.position();
+            this.ensureVanillaNavigationProgress();
         }
         return started;
+    }
+
+    private void ensureVanillaNavigationProgress() {
+        if (this.activeNavigationTarget == null) {
+            return;
+        }
+        if (this.tickCount % 10 != 0) {
+            return;
+        }
+        if (this.getNavigation().getPath() == null || this.getNavigation().isDone()) {
+            Vec3 center = Vec3.atCenterOf(this.activeNavigationTarget);
+            this.getNavigation().moveTo(center.x, center.y, center.z, this.activeNavigationSpeed);
+        }
     }
 
     private boolean shouldAutoCrouch() {
@@ -2038,8 +2065,7 @@ public class AIPlayerEntity extends Zombie {
         }
 
         if (this.jumpCooldown <= 0) {
-            Vec3 motion = this.getDeltaMovement();
-            this.setDeltaMovement(motion.x, Math.max(motion.y, 0.28D), motion.z);
+            this.getJumpControl().jump();
             this.jumpCooldown = 10;
         }
         return true;
@@ -2160,10 +2186,10 @@ public class AIPlayerEntity extends Zombie {
         if (horizontal.lengthSqr() > 1.0E-4D) {
             double moveSpeed = Math.max(0.85D, horizontalSpeed * 5.0D);
             this.facePosition(target);
+            this.runtimeClearWasdOverride();
             this.getMoveControl().setWantedPosition(target.x, target.y, target.z, moveSpeed);
             if ((this.isInWater() || this.isUnderWater() || this.isInLava()) && this.jumpCooldown <= 0) {
-                Vec3 motion = this.getDeltaMovement();
-                this.setDeltaMovement(motion.x, Math.max(motion.y, verticalSpeed), motion.z);
+                this.getJumpControl().jump();
                 this.jumpCooldown = 8;
             }
         }
