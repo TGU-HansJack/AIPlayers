@@ -27,6 +27,13 @@ public final class AgentConfigManager {
         return config;
     }
 
+    public static void setDebugLogsEnabled(boolean enabled) {
+        Config next = config == null ? Config.createDefault() : config.normalize();
+        next.debugLogsEnabled = enabled;
+        config = next;
+        save(next);
+    }
+
     private static Config loadOrCreate() {
         try {
             Files.createDirectories(CONFIG_PATH.getParent());
@@ -67,6 +74,7 @@ public final class AgentConfigManager {
         private int pathCacheTtlSeconds;
         private int resourceCacheTtlSeconds;
         private String movementProfile;
+        private Boolean debugLogsEnabled;
 
         private static Config createDefault() {
             Config config = new Config();
@@ -78,6 +86,7 @@ public final class AgentConfigManager {
             config.pathCacheTtlSeconds = 10;
             config.resourceCacheTtlSeconds = 3;
             config.movementProfile = "player_like";
+            config.debugLogsEnabled = true;
             return config;
         }
 
@@ -108,6 +117,9 @@ public final class AgentConfigManager {
             if (this.movementProfile == null || this.movementProfile.isBlank()) {
                 this.movementProfile = "player_like";
             }
+            if (this.debugLogsEnabled == null) {
+                this.debugLogsEnabled = true;
+            }
             return this;
         }
 
@@ -119,5 +131,6 @@ public final class AgentConfigManager {
         public int pathCacheTtlSeconds() { return this.pathCacheTtlSeconds; }
         public int resourceCacheTtlSeconds() { return this.resourceCacheTtlSeconds; }
         public String movementProfile() { return this.movementProfile; }
+        public boolean debugLogsEnabled() { return this.debugLogsEnabled == null || this.debugLogsEnabled; }
     }
 }

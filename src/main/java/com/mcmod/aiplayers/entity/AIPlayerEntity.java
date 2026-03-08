@@ -141,6 +141,11 @@ public class AIPlayerEntity extends PathfinderMob {
     private static final double HUNT_SCAN_RANGE = 28.0D;
     private static final int AWARENESS_BROADCAST_INTERVAL = 20 * 12;
     private static final int DEBUG_STATUS_BROADCAST_INTERVAL = 20 * 3;
+    private static final int LOCAL_AWARENESS_HALF_RANGE = 10;
+    private static final int LOCAL_AWARENESS_VERTICAL_RANGE = 10;
+    private static final int LOCAL_AWARENESS_MAX_POINTS_PER_GROUP = 6;
+    private static final int RECOVERY_DETOUR_SCAN_RADIUS = 10;
+    private static final int RECOVERY_DETOUR_VERTICAL_RANGE = 10;
 
     private final NonNullList<ItemStack> backpack = NonNullList.withSize(BACKPACK_SIZE, ItemStack.EMPTY);
     private final List<String> memory = new ArrayList<>();
@@ -233,6 +238,7 @@ public class AIPlayerEntity extends PathfinderMob {
     private String huntTargetLabel = "";
     private BlockPos huntLastKnownPos;
     private String lastEnvironmentSignature = "";
+    private String localRelativeAwareness = "局部坐标=暂无";
     private int nextAwarenessBroadcastTick;
     private boolean pendingAwarenessBroadcast;
 
@@ -1063,6 +1069,9 @@ public class AIPlayerEntity extends PathfinderMob {
     }
 
     private void tickDebugStatusBroadcast() {
+        if (!AgentConfigManager.getConfig().debugLogsEnabled()) {
+            return;
+        }
         if (this.tickCount - this.lastDebugStatusTick < DEBUG_STATUS_BROADCAST_INTERVAL) {
             return;
         }
@@ -2964,11 +2973,16 @@ public class AIPlayerEntity extends PathfinderMob {
             return approach;
         }
 
+        BlockPos localVolume = this.findRecoveryDetourInVolume(target, RECOVERY_DETOUR_SCAN_RADIUS, RECOVERY_DETOUR_VERTICAL_RANGE);
+        if (localVolume != null) {
+            return localVolume;
+        }
+
         BlockPos best = null;
         double bestScore = Double.MAX_VALUE;
         for (Direction direction : Direction.Plane.HORIZONTAL) {
-            for (int step = 1; step <= 3; step++) {
-                BlockPos candidate = this.findWalkablePositionNear(this.blockPosition().relative(direction, step), 2, 2);
+            for (int step = 1; step <= 6; step++) {
+                BlockPos candidate = this.findWalkablePositionNear(this.blockPosition().relative(direction, step), 3, 3, true);
                 if (candidate == null) {
                     continue;
                 }
@@ -2979,7 +2993,54 @@ public class AIPlayerEntity extends PathfinderMob {
                 }
             }
         }
-        return best != null ? best : this.findWalkablePositionNear(target, 4, 4);
+        if (best != null) {
+            return best;
+        }
+        BlockPos aroundTarget = this.findWalkablePositionNear(target, 7, 6, true);
+        if (aroundTarget != null) {
+            return aroundTarget;
+        }
+        return this.findNearbyDryStandPosition(target, 8, 6);
+    }
+
+    private BlockPos findRecoveryDetourInVolume(BlockPos target, int horizontalRadius, int verticalRadius) {
+        if (target == null) {
+            return null;
+        }
+        BlockPos origin = this.blockPosition();
+        BlockPos bestPos = null;
+        double bestScore = Double.MAX_VALUE;
+        double currentDistanceToTarget = origin.distSqr(target);
+
+        for (int x = -horizontalRadius; x <= horizontalRadius; x++) {
+            for (int y = -verticalRadius; y <= verticalRadius; y++) {
+                for (int z = -horizontalRadius; z <= horizontalRadius; z++) {
+                    if (x == 0 && y == 0 && z == 0) {
+                        continue;
+                    }
+                    BlockPos candidate = origin.offset(x, y, z);
+                    if (!this.canStandAt(candidate, true)) {
+                        continue;
+                    }
+                    double targetDistance = candidate.distSqr(target);
+                    double selfDistance = candidate.distSqr(origin);
+                    if (targetDistance > currentDistanceToTarget + 16.0D && selfDistance > 16.0D) {
+                        continue;
+                    }
+                    double verticalPenalty = Math.abs(candidate.getY() - origin.getY()) * 1.35D;
+                    boolean canDirectTraverse = this.runtimeCanDirectlyTraverse(this.position(), Vec3.atCenterOf(candidate));
+                    double score = targetDistance * 1.65D
+                            + selfDistance * 0.72D
+                            + verticalPenalty
+                            + (canDirectTraverse ? 0.0D : 4.2D);
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestPos = candidate.immutable();
+                    }
+                }
+            }
+        }
+        return bestPos;
     }
 
     private boolean emergencyReposition(BlockPos pos, String observationPrefix) {
@@ -3162,12 +3223,19 @@ public class AIPlayerEntity extends PathfinderMob {
         if (target == null) {
             return null;
         }
-        Vec3 targetCenter = Vec3.atCenterOf(target);
         Vec3 eye = this.getEyePosition();
-        if (eye.distanceTo(targetCenter) > Math.max(1.0D, maxDistance)) {
-            return null;
+        Vec3 targetCenter = Vec3.atCenterOf(target);
+        double clampedDistance = Math.max(1.0D, maxDistance);
+        Vec3 end = targetCenter;
+        double directDistance = eye.distanceTo(targetCenter);
+        if (directDistance > clampedDistance) {
+            Vec3 delta = targetCenter.subtract(eye);
+            if (delta.lengthSqr() < 1.0E-6D) {
+                return null;
+            }
+            end = eye.add(delta.normalize().scale(clampedDistance));
         }
-        BlockHitResult hitResult = this.level().clip(new ClipContext(eye, targetCenter, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, this));
+        BlockHitResult hitResult = this.level().clip(new ClipContext(eye, end, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, this));
         if (hitResult.getType() != HitResult.Type.BLOCK) {
             return null;
         }
@@ -4177,6 +4245,7 @@ public class AIPlayerEntity extends PathfinderMob {
         this.rememberedChest = perception.chest() != null ? perception.chest().pos() : TeamKnowledge.findNearestResource(this, ResourceType.CHEST, this.blockPosition());
         this.rememberedCraftingTable = perception.crafting() != null ? perception.crafting().pos() : TeamKnowledge.findNearestResource(this, ResourceType.CRAFTING, this.blockPosition());
         this.rememberedFurnace = perception.furnace() != null ? perception.furnace().pos() : TeamKnowledge.findNearestResource(this, ResourceType.FURNACE, this.blockPosition());
+        this.localRelativeAwareness = this.buildLocalRelativeAwarenessSummary();
 
         int nearbyPlayers = this.level().getEntitiesOfClass(Player.class, scanBox, player -> player.isAlive() && !player.isSpectator()).size();
         List<String> notices = new ArrayList<>();
@@ -4205,6 +4274,9 @@ public class AIPlayerEntity extends PathfinderMob {
             }
         }
         notices.addAll(perception.notices());
+        if (this.localRelativeAwareness != null && !this.localRelativeAwareness.isBlank()) {
+            notices.add(this.localRelativeAwareness);
+        }
         this.lastObservation = notices.isEmpty() ? DEFAULT_OBSERVATION : String.join(" | ", notices);
         this.latestCognitiveSummary = this.buildCognitiveSummary() + " | 团队知识=" + TeamKnowledge.getSummary(this);
         this.updateKnowledgeNotes();
@@ -5460,10 +5532,123 @@ public class AIPlayerEntity extends PathfinderMob {
         if (this.rememberedOre != null) {
             parts.add("记得矿点位置");
         }
+        if (this.localRelativeAwareness != null && !this.localRelativeAwareness.isBlank()) {
+            parts.add(this.localRelativeAwareness);
+        }
         if (parts.isEmpty()) {
             return "环境稳定，继续观察";
         }
         return String.join("；", parts);
+    }
+
+    private String buildLocalRelativeAwarenessSummary() {
+        BlockPos origin = this.blockPosition();
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        List<BlockPos> blockers = new ArrayList<>();
+        List<BlockPos> toggles = new ArrayList<>();
+        List<BlockPos> resources = new ArrayList<>();
+        List<BlockPos> hazards = new ArrayList<>();
+
+        for (int x = -LOCAL_AWARENESS_HALF_RANGE; x <= LOCAL_AWARENESS_HALF_RANGE; x++) {
+            for (int y = -LOCAL_AWARENESS_VERTICAL_RANGE; y <= LOCAL_AWARENESS_VERTICAL_RANGE; y++) {
+                for (int z = -LOCAL_AWARENESS_HALF_RANGE; z <= LOCAL_AWARENESS_HALF_RANGE; z++) {
+                    cursor.set(origin.getX() + x, origin.getY() + y, origin.getZ() + z);
+                    BlockPos pos = cursor.immutable();
+                    BlockState state = this.level().getBlockState(cursor);
+
+                    if (this.level().getFluidState(cursor).is(FluidTags.LAVA)) {
+                        hazards.add(pos);
+                    }
+                    if (state.isAir()) {
+                        continue;
+                    }
+                    if (this.isToggleablePathBlock(state)
+                            && state.hasProperty(BlockStateProperties.OPEN)
+                            && !Boolean.TRUE.equals(state.getValue(BlockStateProperties.OPEN))) {
+                        toggles.add(pos);
+                    }
+                    if (KnowledgeManager.isTreeLog(state) || state.is(BlockTags.LOGS) || this.isInterestingOre(state, pos)) {
+                        resources.add(pos);
+                    }
+                    if (this.isBreakableNavigationObstacle(state) || this.isSurfacePathBreakable(state)) {
+                        blockers.add(pos);
+                    }
+                    if (state.getFluidState().is(FluidTags.LAVA)) {
+                        hazards.add(pos);
+                    }
+                }
+            }
+        }
+
+        Comparator<BlockPos> byDistance = Comparator.comparingDouble(pos -> this.distanceToSqr(Vec3.atCenterOf(pos)));
+        blockers.sort(byDistance);
+        toggles.sort(byDistance);
+        resources.sort(byDistance);
+        hazards.sort(byDistance);
+
+        List<String> groups = new ArrayList<>(4);
+        String blockerGroup = this.formatRelativeGroup("障碍", blockers);
+        String toggleGroup = this.formatRelativeGroup("开关", toggles);
+        String resourceGroup = this.formatRelativeGroup("资源", resources);
+        String hazardGroup = this.formatRelativeGroup("危险", hazards);
+        if (!blockerGroup.isBlank()) {
+            groups.add(blockerGroup);
+        }
+        if (!toggleGroup.isBlank()) {
+            groups.add(toggleGroup);
+        }
+        if (!resourceGroup.isBlank()) {
+            groups.add(resourceGroup);
+        }
+        if (!hazardGroup.isBlank()) {
+            groups.add(hazardGroup);
+        }
+        if (groups.isEmpty()) {
+            return "局部坐标=暂无";
+        }
+        return "局部坐标[" + String.join(" | ", groups) + "]";
+    }
+
+    private String formatRelativeGroup(String label, List<BlockPos> points) {
+        if (points == null || points.isEmpty()) {
+            return "";
+        }
+        List<String> entries = new ArrayList<>();
+        Set<Long> dedupe = new HashSet<>();
+        for (BlockPos pos : points) {
+            if (pos == null || !dedupe.add(pos.asLong())) {
+                continue;
+            }
+            entries.add(this.describeRelativeBlock(pos));
+            if (entries.size() >= LOCAL_AWARENESS_MAX_POINTS_PER_GROUP) {
+                break;
+            }
+        }
+        if (entries.isEmpty()) {
+            return "";
+        }
+        return label + "=" + String.join("/", entries);
+    }
+
+    private String describeRelativeBlock(BlockPos pos) {
+        Identifier blockId = BuiltInRegistries.BLOCK.getKey(this.level().getBlockState(pos).getBlock());
+        String idPath = blockId == null ? "unknown" : blockId.getPath();
+        return idPath + "@" + this.formatRelativePos(pos);
+    }
+
+    private String formatRelativePos(BlockPos pos) {
+        if (pos == null) {
+            return "0,0,0";
+        }
+        BlockPos origin = this.blockPosition();
+        int dx = pos.getX() - origin.getX();
+        int dy = pos.getY() - origin.getY();
+        int dz = pos.getZ() - origin.getZ();
+        return this.formatSigned(dx) + "," + this.formatSigned(dy) + "," + this.formatSigned(dz);
+    }
+
+    private String formatSigned(int value) {
+        return value > 0 ? "+" + value : Integer.toString(value);
     }
 
     private void sendOwnerAlert(String message, boolean force) {
@@ -6115,6 +6300,10 @@ public class AIPlayerEntity extends PathfinderMob {
         BlockPos expanded = this.findWalkablePositionNear(pos, 7, 6, true);
         if (expanded != null) {
             return expanded;
+        }
+        BlockPos wide = this.findWalkablePositionNear(pos, 10, 8, true);
+        if (wide != null) {
+            return wide;
         }
         return this.findNearbyDryStandPosition(pos, 8, 6);
     }

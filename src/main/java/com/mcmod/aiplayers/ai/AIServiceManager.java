@@ -44,6 +44,8 @@ public final class AIServiceManager {
     private static final int DEFAULT_TIMEOUT_MS = 45000;
     private static final int MIN_TIMEOUT_MS = 8000;
     private static final int MAX_TIMEOUT_MS = 180000;
+    private static final int QWEN_COMPAT_MIN_TIMEOUT_MS = 18000;
+    private static final int QWEN_COMPAT_MIN_PLAN_TIMEOUT_MS = 22000;
     private static final int DEFAULT_MAX_RETRIES = 3;
     private static final int MAX_RETRIES_LIMIT = 6;
     private static final int CONVERSATION_MAX_TOKENS = 280;
@@ -64,7 +66,8 @@ public final class AIServiceManager {
     }
 
     public static boolean canUseConversationService() {
-        return config.conversationEnabled
+        return config.enabled
+                && config.conversationEnabled
                 && config.url != null
                 && !config.url.isBlank()
                 && config.conversationModel != null
@@ -72,7 +75,9 @@ public final class AIServiceManager {
     }
 
     public static boolean canUseGoalPlanningService() {
-        return config.taskPlanningEnabled
+        return config.enabled
+                && config.taskAiEnabled
+                && config.taskPlanningEnabled
                 && config.url != null
                 && !config.url.isBlank()
                 && config.goalModel != null
@@ -92,7 +97,7 @@ public final class AIServiceManager {
     }
 
     public static int getTaskAiIntervalTicks() {
-        return getReplanIntervalTicks();
+        return Math.max(60, config.taskAiIntervalSeconds * 20);
     }
 
     public static String getPlannerMode() {
@@ -117,6 +122,9 @@ public final class AIServiceManager {
                 + "；规划模式：" + config.plannerMode
                 + "；对话：" + (config.conversationEnabled ? config.conversationModel : "关闭")
                 + "；任务规划：" + (config.taskPlanningEnabled ? config.goalModel : "关闭")
+                + "；超时=" + resolveRequestTimeoutMs()
+                + "ms"
+                + "；重试=" + config.maxRetries
                 + "；地址：" + endpoint
                 + "；状态：" + lastStatus;
     }
@@ -261,7 +269,7 @@ public final class AIServiceManager {
         user.addProperty("content", buildConversationUserPrompt(companion, speaker, message));
         messages.add(user);
         root.add("messages", messages);
-        return createRequest(root);
+        return createRequest(root, config.conversationModel, false);
     }
 
     private static HttpRequest buildGoalPlanningRequest(AIPlayerEntity companion, AgentSnapshot snapshot, AgentGoal localGoal) {
@@ -280,12 +288,12 @@ public final class AIServiceManager {
         user.addProperty("content", buildGoalPlanningUserPrompt(companion, snapshot, localGoal));
         messages.add(user);
         root.add("messages", messages);
-        return createRequest(root);
+        return createRequest(root, config.goalModel, true);
     }
 
-    private static HttpRequest createRequest(JsonObject root) {
+    private static HttpRequest createRequest(JsonObject root, String model, boolean planningRequest) {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(config.url))
-                .timeout(Duration.ofMillis(resolveRequestTimeoutMs()))
+                .timeout(Duration.ofMillis(resolveRequestTimeoutMs(model, planningRequest)))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(root), StandardCharsets.UTF_8));
         if (config.apiKey != null && !config.apiKey.isBlank()) {
@@ -322,7 +330,7 @@ public final class AIServiceManager {
                     if (attempt < maxRetries && shouldRetry(cause)) {
                         int nextAttempt = attempt + 1;
                         lastStatus = scope + "超时/网络抖动，重试 " + nextAttempt + "/" + maxRetries;
-                        long backoffMs = Math.min(2000L, 400L * nextAttempt);
+                        long backoffMs = retryDelayMs(nextAttempt);
                         CompletableFuture.delayedExecutor(backoffMs, TimeUnit.MILLISECONDS)
                                 .execute(() -> sendAsyncAttempt(client, request, scope, nextAttempt, maxRetries, result));
                         return;
@@ -413,6 +421,7 @@ public final class AIServiceManager {
                 + "夜晚：" + summary.night + "\n"
                 + "建材单位：" + summary.buildingUnits + "\n"
                 + "观察：" + summary.observation + "\n"
+                + "局部认知：" + summary.cognition + "\n"
                 + "背包：" + summary.inventory + "\n"
                 + "合成链提示：" + KnowledgeManager.getCraftingHintSummary() + "\n"
                 + "生物弱点提示：" + KnowledgeManager.getMobKnowledgeSummary() + "\n"
@@ -591,13 +600,53 @@ public final class AIServiceManager {
     }
 
     private static int resolveRequestTimeoutMs() {
-        return Math.max(MIN_TIMEOUT_MS, Math.min(config.timeoutMs, MAX_TIMEOUT_MS));
+        int conversationTimeout = resolveRequestTimeoutMs(config.conversationModel, false);
+        int planningTimeout = resolveRequestTimeoutMs(config.goalModel, true);
+        return Math.max(conversationTimeout, planningTimeout);
+    }
+
+    private static int resolveRequestTimeoutMs(String model, boolean planningRequest) {
+        int timeout = Math.max(MIN_TIMEOUT_MS, Math.min(config.timeoutMs, MAX_TIMEOUT_MS));
+        if (isQwenCompatibleProvider(config.provider, config.url)) {
+            int timeoutFloor = planningRequest ? QWEN_COMPAT_MIN_PLAN_TIMEOUT_MS : QWEN_COMPAT_MIN_TIMEOUT_MS;
+            if (isLikelySlowModel(model)) {
+                timeoutFloor += 4000;
+            }
+            timeout = Math.max(timeout, timeoutFloor);
+        }
+        return timeout;
     }
 
     private static int resolveConnectTimeoutMs() {
-        int requestTimeout = resolveRequestTimeoutMs();
+        int requestTimeout = Math.max(
+                resolveRequestTimeoutMs(config.conversationModel, false),
+                resolveRequestTimeoutMs(config.goalModel, true));
         int connect = Math.max(3000, requestTimeout / 2);
         return Math.min(connect, 30000);
+    }
+
+    private static boolean isQwenCompatibleProvider(String provider, String url) {
+        String normalizedProvider = provider == null ? "" : provider.toLowerCase();
+        if (normalizedProvider.contains("qwen")) {
+            return true;
+        }
+        return isDashScopeEndpoint(url);
+    }
+
+    private static boolean isDashScopeEndpoint(String url) {
+        String normalizedUrl = url == null ? "" : url.toLowerCase();
+        return normalizedUrl.contains("dashscope.aliyuncs.com")
+                && normalizedUrl.contains("compatible-mode");
+    }
+
+    private static boolean isLikelySlowModel(String model) {
+        if (model == null || model.isBlank()) {
+            return false;
+        }
+        String normalizedModel = model.toLowerCase();
+        return normalizedModel.contains("qwen3.5-plus")
+                || normalizedModel.contains("qwen-plus")
+                || normalizedModel.contains("qwen-max");
     }
 
     private static long retryDelayMs(int attempt) {
@@ -727,6 +776,12 @@ public final class AIServiceManager {
             if (this.goalModel == null || this.goalModel.isBlank()) {
                 this.goalModel = this.model;
             }
+            if (isQwenCompatibleProvider(this.provider, this.url)) {
+                int providerFloor = isLikelySlowModel(this.goalModel) || isLikelySlowModel(this.conversationModel)
+                        ? QWEN_COMPAT_MIN_PLAN_TIMEOUT_MS
+                        : QWEN_COMPAT_MIN_TIMEOUT_MS;
+                this.timeoutMs = Math.max(this.timeoutMs, providerFloor);
+            }
             if (this.replanIntervalSeconds <= 0) {
                 this.replanIntervalSeconds = this.taskAiIntervalSeconds > 0 ? this.taskAiIntervalSeconds : 5;
             }
@@ -748,7 +803,7 @@ public final class AIServiceManager {
         }
     }
 
-    private record WorldSummary(boolean ownerAvailable, double ownerDistance, boolean inHazard, boolean lowFood, boolean lowTools, boolean night, int buildingUnits, String observation, String inventory) {
+    private record WorldSummary(boolean ownerAvailable, double ownerDistance, boolean inHazard, boolean lowFood, boolean lowTools, boolean night, int buildingUnits, String observation, String inventory, String cognition) {
         private static WorldSummary from(AgentSnapshot snapshot) {
             return new WorldSummary(
                     snapshot.worldState().ownerAvailable(),
@@ -759,7 +814,8 @@ public final class AIServiceManager {
                     snapshot.worldState().night(),
                     snapshot.worldState().buildingUnits(),
                     snapshot.worldState().observation(),
-                    snapshot.worldState().inventory());
+                    snapshot.worldState().inventory(),
+                    snapshot.worldState().cognition());
         }
     }
 

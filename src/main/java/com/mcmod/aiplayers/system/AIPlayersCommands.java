@@ -82,6 +82,10 @@ public final class AIPlayersCommands {
                         .then(Commands.literal("reload").executes(AIPlayersCommands::apiReload))
                         .then(Commands.literal("enable").executes(AIPlayersCommands::apiEnable))
                         .then(Commands.literal("disable").executes(AIPlayersCommands::apiDisable)))
+                .then(Commands.literal("dbg")
+                        .then(Commands.literal("status").executes(AIPlayersCommands::dbgStatus))
+                        .then(Commands.literal("on").executes(AIPlayersCommands::dbgOn))
+                        .then(Commands.literal("off").executes(AIPlayersCommands::dbgOff)))
                 .then(Commands.literal("knowledge")
                         .then(Commands.literal("reload").executes(AIPlayersCommands::knowledgeReload))
                         .then(Commands.literal("status").executes(AIPlayersCommands::knowledgeStatus))));
@@ -246,6 +250,24 @@ public final class AIPlayersCommands {
         AIServiceManager.setEnabled(false);
         context.getSource().sendSuccess(() -> Component.literal("已关闭 AI 接口。"), false);
         context.getSource().sendSuccess(() -> Component.literal(AIServiceManager.getStatusSummary()), false);
+        return 1;
+    }
+
+    private static int dbgStatus(CommandContext<CommandSourceStack> context) {
+        boolean enabled = AgentConfigManager.getConfig().debugLogsEnabled();
+        context.getSource().sendSuccess(() -> Component.literal("DBG 日志：" + (enabled ? "已开启" : "已关闭")), false);
+        return 1;
+    }
+
+    private static int dbgOn(CommandContext<CommandSourceStack> context) {
+        AgentConfigManager.setDebugLogsEnabled(true);
+        context.getSource().sendSuccess(() -> Component.literal("已开启 DBG 日志（AI-DBG 与服务端 debug 输出）。"), false);
+        return 1;
+    }
+
+    private static int dbgOff(CommandContext<CommandSourceStack> context) {
+        AgentConfigManager.setDebugLogsEnabled(false);
+        context.getSource().sendSuccess(() -> Component.literal("已关闭 DBG 日志。"), false);
         return 1;
     }
 
