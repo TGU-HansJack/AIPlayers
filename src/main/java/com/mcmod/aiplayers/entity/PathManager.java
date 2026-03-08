@@ -1,18 +1,20 @@
 package com.mcmod.aiplayers.entity;
 
-import java.util.List;
+import com.mcmod.aiplayers.vendor.baritone.api.pathing.goals.PathGoal;
+import com.mcmod.aiplayers.vendor.baritone.behavior.PathingBehavior;
+import com.mcmod.aiplayers.vendor.baritone.pathing.movement.CalculationContext;
+import com.mcmod.aiplayers.vendor.baritone.pathing.movement.Movement;
+import com.mcmod.aiplayers.vendor.baritone.pathing.path.Path;
+import com.mcmod.aiplayers.vendor.baritone.pathing.path.PathExecutor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;
 
 final class PathManager {
-    private static final int MAX_LOOKAHEAD_NODES = 4;
-    private static final int LOCAL_RECOVERY_TICKS = 20;
-    private static final int LOCAL_REPOSITION_TICKS = 40;
+    private static final int LOCAL_RECOVERY_TICKS = 8;
     private static final int REPLAN_TICKS = 60;
     private static final int REPLAN_BACKOFF_TICKS = 20;
     private static final int PATH_REPLAN_COOLDOWN_TICKS = 20;
-    private static final int PATH_TIMEOUT_TICKS = 200;
     private static final int STUCK_CHECK_INTERVAL_TICKS = 5;
     private static final double STUCK_PROGRESS_THRESHOLD_SQR = 4.0E-4D;
     private static final double SPIN_PROGRESS_THRESHOLD_SQR = 1.0E-3D;
@@ -20,11 +22,6 @@ final class PathManager {
     private static final int SPIN_TRIGGER_TICKS = 20;
     private static final double ARRIVE_XZ_DISTANCE_SQR = 0.36D;
     private static final double ARRIVE_Y_ABS = 1.0D;
-    private static final double WAYPOINT_ADVANCE_XZ_DISTANCE_SQR = 0.49D;
-    private static final double WAYPOINT_ADVANCE_Y_ABS = 1.1D;
-    private static final int NODE_ACTION_COOLDOWN_TICKS = 6;
-    private static final int RECOVERY_JUMP_COOLDOWN_TICKS = 14;
-    private static final int DIGGABLE_RETRY_COOLDOWN_TICKS = 8;
 
     private final AIPlayerEntity entity;
     private final PathCooldown pathCooldown = new PathCooldown(PATH_REPLAN_COOLDOWN_TICKS, REPLAN_BACKOFF_TICKS);
@@ -35,174 +32,145 @@ final class PathManager {
             SPIN_YAW_DELTA_THRESHOLD,
             SPIN_TRIGGER_TICKS);
     private final AntiStuckSystem antiStuckSystem = new AntiStuckSystem(this.stuckDetector);
+    private final BaritoneEntityContextAdapter baritoneContext;
+    private final BaritoneMovementExecutorAdapter movementExecutor;
+    private final PathingBehavior pathingBehavior;
 
-    private List<PathNode> activePath = List.of();
-    private PathPlan currentPlan = new PathPlan(null, List.of(), "idle");
+    private PathPlan currentPlan = new PathPlan(null, java.util.List.of(), "idle");
+    private PathGoal targetGoal;
     private BlockPos targetPos;
-    private int pathIndex;
     private double speedModifier = 1.0D;
     private PathState pathState = PathState.IDLE;
     private String pathStatus = "空闲";
-    private long activePathStartTick;
-    private long lastNodeActionTick;
-    private long lastRecoveryJumpTick;
-    private long lastDiggableAttemptTick;
+    private int recoveryTicks;
+    private AntiStuckSystem.StuckSummary lastStuckSummary = new AntiStuckSystem.StuckSummary(0, 0, 0, 0, 0, false, false);
 
     PathManager(AIPlayerEntity entity) {
         this.entity = entity;
+        this.baritoneContext = new BaritoneEntityContextAdapter(entity);
+        this.movementExecutor = new BaritoneMovementExecutorAdapter(this.baritoneContext, this.baritoneContext.playerController());
+        this.pathingBehavior = new PathingBehavior(this.baritoneContext, this.movementExecutor);
     }
 
     boolean requestPathTo(BlockPos target, double speedModifier) {
-        BlockPos resolvedTarget = this.entity.runtimeResolveMovementTarget(target);
-        if (resolvedTarget == null) {
-            this.pathState = PathState.IDLE;
-            this.pathStatus = "目标不可达";
+        return this.requestPath(BaritoneGoalAdapter.forBlock(target), speedModifier);
+    }
+
+    boolean requestPath(PathGoal goal, double speedModifier) {
+        if (goal == null) {
+            this.clear();
+            this.pathStatus = "目标为空";
             return false;
         }
-        this.pathState = PathState.PATHING;
         long gameTime = this.entity.level().getGameTime();
-        boolean sameTargetRegion = this.targetPos != null && this.targetPos.distSqr(resolvedTarget) <= 4.0D;
-        boolean hasPath = !this.activePath.isEmpty();
-
-        if (this.targetPos != null && this.targetPos.distSqr(resolvedTarget) <= 1.0D && hasPath) {
-            this.targetPos = resolvedTarget.immutable();
-            this.speedModifier = speedModifier;
-            this.pathStatus = "沿用当前路径";
-            return true;
-        }
-        if (this.pathCooldown.canReuseRecentPath(sameTargetRegion, hasPath, isSeverelyStuck(), gameTime)) {
-            this.targetPos = resolvedTarget.immutable();
-            this.speedModifier = speedModifier;
-            this.pathStatus = "沿用冷却期内路径";
-            return true;
-        }
-        if (sameTargetRegion && this.pathCooldown.inRequestCooldown(gameTime) && this.activePath.isEmpty()) {
-            this.targetPos = resolvedTarget.immutable();
-            this.speedModifier = speedModifier;
-            applyNewPath(List.of(PathNode.move(Vec3.atCenterOf(this.targetPos))), gameTime);
-            this.pathStatus = "路径重算冷却中，先直控逼近";
-            return true;
-        }
-
-        this.targetPos = resolvedTarget.immutable();
+        BlockPos estimatedTarget = BaritoneGoalAdapter.estimateTargetPos(goal, this.entity.blockPosition());
+        this.movementExecutor.setSpeedScale(speedModifier);
         this.speedModifier = speedModifier;
-        this.pathCooldown.markPathRequest(gameTime);
-        boolean budgetGranted = TeamKnowledge.tryAcquirePathBudget(this.entity, gameTime);
-        if (!budgetGranted && hasPath && !this.isSeverelyStuck()) {
+
+        if (goal.isInGoal(this.entity.blockPosition())) {
+            this.targetGoal = null;
+            this.targetPos = estimatedTarget == null ? null : estimatedTarget.immutable();
+            this.pathState = PathState.IDLE;
+            this.pathStatus = "已在目标范围";
+            this.pathingBehavior.cancelEverything();
+            this.updatePlanFromBehavior();
+            return false;
+        }
+
+        boolean sameTargetRegion = this.targetPos != null && estimatedTarget != null && this.targetPos.distSqr(estimatedTarget) <= 4.0D;
+        if (sameTargetRegion && this.pathingBehavior.isPathing() && !this.isSeverelyStuck()) {
+            this.targetGoal = goal;
+            this.targetPos = estimatedTarget.immutable();
             this.pathState = PathState.MOVING;
-            this.pathStatus = "团队路径预算忙，沿用当前路径";
+            this.pathStatus = "沿用 vendor 路径";
+            this.updatePlanFromBehavior();
+            return true;
+        }
+        if (this.pathCooldown.canReuseRecentPath(sameTargetRegion, this.pathingBehavior.getCurrent() != null, this.isSeverelyStuck(), gameTime)) {
+            this.targetGoal = goal;
+            this.targetPos = estimatedTarget == null ? null : estimatedTarget.immutable();
+            this.pathState = PathState.MOVING;
+            this.pathStatus = "沿用冷却期 vendor 路径";
+            this.updatePlanFromBehavior();
             return true;
         }
 
-        List<PathNode> planned = budgetGranted
-                ? AgentPathPlanner.plan(this.entity, this.targetPos)
-                : List.of(PathNode.move(Vec3.atCenterOf(this.targetPos)));
-        if (planned.isEmpty()) {
-            planned = List.of(PathNode.move(Vec3.atCenterOf(this.targetPos)));
-            this.pathStatus = budgetGranted ? "路径缺失，切换直控逼近" : "预算忙，先直控逼近";
-        } else {
-            this.pathStatus = describeFreshPath(planned, budgetGranted);
+        boolean budgetGranted = TeamKnowledge.tryAcquirePathBudget(this.entity, gameTime);
+        if (!budgetGranted && this.pathingBehavior.isPathing() && !this.isSeverelyStuck()) {
+            this.targetGoal = goal;
+            this.targetPos = estimatedTarget == null ? null : estimatedTarget.immutable();
+            this.pathState = PathState.MOVING;
+            this.pathStatus = "团队路径预算忙，沿用当前 vendor 路径";
+            this.updatePlanFromBehavior();
+            return true;
         }
-        applyNewPath(planned, gameTime);
-        return true;
+
+        this.targetGoal = goal;
+        this.targetPos = estimatedTarget == null ? null : estimatedTarget.immutable();
+        this.pathState = PathState.PATHING;
+        this.pathCooldown.markPathRequest(gameTime);
+        boolean started = this.pathingBehavior.secretInternalSetGoalAndPath(goal, new CalculationContext(this.baritoneContext));
+        this.pathStatus = started ? "Baritone 路径已生成" : "Baritone 路径计算失败";
+        this.updatePlanFromBehavior();
+        return started || this.pathingBehavior.getCurrentPath() != null;
     }
 
     void clear() {
-        this.activePath = List.of();
+        this.targetGoal = null;
         this.targetPos = null;
-        this.pathIndex = 0;
         this.speedModifier = 1.0D;
         this.pathState = PathState.IDLE;
         this.pathStatus = "空闲";
-        this.activePathStartTick = 0L;
-        this.lastNodeActionTick = 0L;
-        this.lastRecoveryJumpTick = 0L;
-        this.lastDiggableAttemptTick = 0L;
+        this.recoveryTicks = 0;
+        this.currentPlan = new PathPlan(null, java.util.List.of(), "idle");
         this.pathCooldown.clear();
         this.stuckDetector.clear();
-        this.entity.runtimeClearWasdOverride();
-        this.entity.setZza(0.0F);
-        this.entity.setXxa(0.0F);
-        this.entity.setSpeed(0.0F);
-        this.entity.setSprinting(false);
+        this.antiStuckSystem.clear();
+        this.lastStuckSummary = new AntiStuckSystem.StuckSummary(0, 0, 0, 0, 0, false, false);
+        this.pathingBehavior.cancelEverything();
+        this.movementExecutor.clearInput();
     }
 
     void tick() {
-        if (this.targetPos == null) {
-            return;
-        }
-        if (this.entity.runtimeIsMiningLocked()) {
-            this.pathState = PathState.STUCK;
-            this.pathStatus = "采掘锁定：暂停导航";
+        if (this.targetGoal == null) {
+            this.pathState = PathState.IDLE;
+            this.pathStatus = "空闲";
+            this.currentPlan = new PathPlan(null, java.util.List.of(), "idle");
             return;
         }
         long gameTime = this.entity.level().getGameTime();
-        if (this.hasReachedTarget(this.targetPos)) {
-            finishAtTarget();
+        this.movementExecutor.setSpeedScale(this.speedModifier);
+
+        if (this.targetGoal.isInGoal(this.entity.blockPosition())) {
+            this.finishAtGoal();
             return;
         }
 
-        if (this.activePathTimedOut(gameTime)) {
-            this.activePath = List.of();
-            this.pathIndex = 0;
-            this.pathState = PathState.REPATH;
-            this.pathStatus = "路径超时，准备重算";
-        }
-
-        if (this.activePath.isEmpty()) {
-            boolean requested = this.requestPathTo(this.targetPos, this.speedModifier);
-            if (this.activePath.isEmpty()) {
-                if (this.tryDiggableAdvance(gameTime, "路径缺失，尝试挖掘开路")) {
-                    return;
-                }
-                this.pathStatus = requested ? "无可用路径，切换直控逼近" : this.pathStatus;
-                driveDirectFallback(gameTime);
-                return;
-            }
-        }
-
-        if (this.pathIndex >= this.activePath.size()) {
-            this.activePath = List.of();
-            this.pathIndex = 0;
-            this.pathState = PathState.REPATH;
-            this.pathStatus = "路径节点耗尽，准备重算";
-            if (this.tryDiggableAdvance(gameTime, "路径节点耗尽，尝试挖掘续航")) {
-                return;
-            }
-            driveDirectFallback(gameTime);
+        if (this.recoveryTicks > 0) {
+            this.tickRecovery();
+            this.updatePlanFromBehavior();
             return;
         }
 
-        PathNode currentNode = this.activePath.get(this.pathIndex);
-        if (!tryHandleNodeAction(currentNode, gameTime)) {
-            return;
+        this.pathingBehavior.tick();
+        this.sampleAntiStuck(gameTime);
+
+        if (this.lastStuckSummary.severe() && this.pathCooldown.canAttemptSevereReplan(gameTime)) {
+            this.beginRecovery("严重卡住，准备 vendor 重算");
+            this.pathCooldown.markSevereReplan(gameTime);
+        } else if (this.lastStuckSummary.recoverNeeded() && this.recoveryTicks == 0) {
+            this.beginRecovery("检测到抖动，执行微退恢复");
+        } else if (this.pathingBehavior.failed() && this.pathCooldown.canAttemptSevereReplan(gameTime)) {
+            this.beginRecovery("movement 失败，准备重新规划");
+            this.pathCooldown.markSevereReplan(gameTime);
         }
-        Vec3 waypoint = chooseWaypoint();
-        detectStuckAndRecover(waypoint, gameTime);
-        if (this.targetPos == null) {
-            return;
-        }
-        if (this.activePath.isEmpty()) {
-            driveDirectFallback(gameTime);
+
+        if (this.targetGoal != null && this.targetGoal.isInGoal(this.entity.blockPosition())) {
+            this.finishAtGoal();
             return;
         }
 
-        Vec3 liquidEscape = selectLiquidEscapeWaypoint();
-        if (liquidEscape != null) {
-            waypoint = liquidEscape;
-            this.pathStatus = "液体脱困：寻找落脚点";
-        }
-
-        double distanceToWaypoint = this.entity.distanceToSqr(waypoint);
-        double appliedSpeed = computeAppliedSpeed(distanceToWaypoint);
-        applyMoveToward(waypoint, appliedSpeed, currentNode.jumpRequired() || liquidEscape != null, gameTime);
-
-        if (liquidEscape == null) {
-            this.pathState = PathState.MOVING;
-            this.pathStatus = this.pathIndex < this.activePath.size() - 1
-                    ? "沿路径推进（" + (this.pathIndex + 1) + "/" + this.activePath.size() + "）"
-                    : "最终接近目标";
-        }
+        this.updatePlanFromBehavior();
     }
 
     boolean hasReachedTarget(BlockPos target) {
@@ -217,19 +185,19 @@ final class PathManager {
     }
 
     boolean isPathActive() {
-        return this.targetPos != null;
+        return this.targetGoal != null;
     }
 
     boolean isIdle() {
-        return this.targetPos == null;
+        return this.targetGoal == null;
     }
 
     boolean isRecovering() {
-        return this.stuckDetector.stuckTicks() >= LOCAL_RECOVERY_TICKS;
+        return this.recoveryTicks > 0 || this.lastStuckSummary.recoverNeeded();
     }
 
     boolean isSeverelyStuck() {
-        return this.stuckDetector.stuckTicks() >= REPLAN_TICKS;
+        return this.lastStuckSummary.severe();
     }
 
     String getPathStatus() {
@@ -244,365 +212,120 @@ final class PathManager {
         return this.targetPos;
     }
 
-    private void applyNewPath(List<PathNode> planned, long gameTime) {
-        this.activePath = planned == null ? List.of() : planned;
-        this.pathIndex = 0;
-        this.activePathStartTick = gameTime;
-        this.pathState = this.activePath.isEmpty() ? PathState.IDLE : PathState.MOVING;
-        this.stuckDetector.reset(this.entity.position(), this.entity.getYRot(), gameTime);
-        this.antiStuckSystem.reset(this.entity.position(), this.entity.getYRot(), gameTime);
-        this.currentPlan = buildPlan(this.targetPos, this.activePath, this.pathStatus);
-    }
-
-    private boolean activePathTimedOut(long gameTime) {
-        return !this.activePath.isEmpty() && this.activePathStartTick > 0L && gameTime - this.activePathStartTick > PATH_TIMEOUT_TICKS;
-    }
-
-    private String describeFreshPath(List<PathNode> planned, boolean budgetGranted) {
-        if (planned.isEmpty()) {
-            return "无可用路径";
-        }
-        if (planned.size() == 1) {
-            return budgetGranted ? "直线接近" : "预算忙，先直线靠近";
-        }
-        return "路径已规划（" + planned.size() + " 节点）";
-    }
-
-    private void finishAtTarget() {
-        this.activePath = List.of();
-        this.targetPos = null;
-        this.pathIndex = 0;
+    private void finishAtGoal() {
+        this.pathingBehavior.cancelEverything();
+        this.movementExecutor.clearInput();
         this.pathState = PathState.IDLE;
-        this.activePathStartTick = 0L;
-        this.lastNodeActionTick = 0L;
-        this.lastRecoveryJumpTick = 0L;
-        this.lastDiggableAttemptTick = 0L;
-        this.stuckDetector.clear();
-        this.antiStuckSystem.clear();
-        this.entity.runtimeClearWasdOverride();
-        this.entity.setZza(0.0F);
-        this.entity.setXxa(0.0F);
-        this.entity.setSpeed(0.0F);
-        this.entity.setSprinting(false);
-        this.pathStatus = "已到达";
-        this.currentPlan = new PathPlan(null, List.of(), this.pathStatus);
+        this.pathStatus = "已到达目标";
+        this.currentPlan = new PathPlan(this.targetPos, java.util.List.of(), "arrived");
+        this.targetGoal = null;
+        this.targetPos = null;
+        this.recoveryTicks = 0;
     }
 
-    private Vec3 chooseWaypoint() {
-        while (this.pathIndex < this.activePath.size() - 1
-                && this.isNearWaypoint(this.activePath.get(this.pathIndex).position(), WAYPOINT_ADVANCE_XZ_DISTANCE_SQR, WAYPOINT_ADVANCE_Y_ABS)) {
-            this.pathIndex++;
-        }
-        Vec3 anchor = this.entity.position();
-        int bestIndex = this.pathIndex;
-        int limit = Math.min(this.activePath.size() - 1, this.pathIndex + MAX_LOOKAHEAD_NODES);
-        for (int probe = limit; probe > this.pathIndex; probe--) {
-            if (this.entity.runtimeCanDirectlyTraverse(anchor, this.activePath.get(probe).position())) {
-                bestIndex = probe;
-                break;
-            }
-        }
-        if (bestIndex > this.pathIndex) {
-            this.pathIndex = bestIndex;
-            this.pathState = PathState.MOVING;
-            this.pathStatus = "前瞻平滑：跳过中间节点";
-        }
-        return this.activePath.get(this.pathIndex).position();
+    private void sampleAntiStuck(long gameTime) {
+        PathExecutor executor = this.pathingBehavior.getCurrent();
+        Movement movement = executor == null ? null : executor.currentMovement();
+        PathNode currentNode = this.toPathNode(movement);
+        boolean breakProgress = movement == null
+                || movement.getActionPos() == null
+                || this.entity.level().getBlockState(movement.getActionPos()).isAir();
+        this.lastStuckSummary = this.antiStuckSystem.sample(
+                this.entity.position(),
+                this.entity.getYRot(),
+                gameTime,
+                currentNode,
+                breakProgress,
+                this.pathingBehavior.isRepathing());
     }
 
-    private double computeAppliedSpeed(double distanceToWaypoint) {
-        if (this.entity.isInWater() || this.entity.isUnderWater() || this.entity.isInLava()) {
-            return Math.min(this.speedModifier, 0.92D);
-        }
-        if (distanceToWaypoint <= 0.36D) {
-            return Math.min(this.speedModifier, 0.72D);
-        }
-        if (distanceToWaypoint <= 2.25D) {
-            return Math.min(this.speedModifier, 0.96D);
-        }
-        if (distanceToWaypoint <= 9.0D) {
-            return Math.min(this.speedModifier, 1.08D);
-        }
-        if (distanceToWaypoint >= 64.0D) {
-            return Mth.clamp(this.speedModifier, 1.05D, 1.32D);
-        }
-        return Math.min(this.speedModifier, 1.18D);
-    }
-
-    private Vec3 selectLiquidEscapeWaypoint() {
-        if (!(this.entity.isInWater() || this.entity.isUnderWater() || this.entity.isInLava())) {
-            return null;
-        }
-        BlockPos dryStand = this.entity.runtimeFindNearbyDryStandPosition(this.entity.blockPosition(), 4, 4);
-        if (dryStand == null) {
-            return null;
-        }
-        if (this.entity.distanceToSqr(Vec3.atCenterOf(dryStand)) <= 2.25D) {
-            return null;
-        }
-        return Vec3.atCenterOf(dryStand);
-    }
-
-    private void detectStuckAndRecover(Vec3 waypoint, long gameTime) {
-        StuckDetector.SampleResult sample = this.stuckDetector.sample(this.entity.position(), this.entity.getYRot(), gameTime);
-        PathNode currentNode = this.pathIndex >= 0 && this.pathIndex < this.activePath.size() ? this.activePath.get(this.pathIndex) : null;
-        AntiStuckSystem.StuckSummary stuckSummary = this.antiStuckSystem.updateFromSample(sample, currentNode, false, false);
-        if (!sample.checked()) {
-            return;
-        }
-        if (sample.spinTriggered()) {
-            handleSpinRecovery(gameTime);
-            if (this.targetPos == null) {
-                return;
-            }
-        }
-        if (sample.stuckTicks() < LOCAL_RECOVERY_TICKS && !stuckSummary.recoverNeeded()) {
-            return;
-        }
-
-        this.pathStatus = "局部避障中|stuck=" + stuckSummary.stuckTicks() + "|nodeLoop=" + stuckSummary.nodeSwitchLoops();
-        this.pathState = PathState.STUCK;
-        if (sample.stuckTicks() >= LOCAL_RECOVERY_TICKS + STUCK_CHECK_INTERVAL_TICKS
-                && this.tryDiggableAdvance(gameTime, "局部卡死，切换挖掘脱困")) {
-            return;
-        }
-        boolean climbNeeded = waypoint != null && waypoint.y > this.entity.getY() + 0.45D;
-        if (this.entity.onGround()
-                && !this.entity.runtimeHasLowCeiling()
-                && (this.entity.horizontalCollision || climbNeeded)
-                && gameTime - this.lastRecoveryJumpTick >= RECOVERY_JUMP_COOLDOWN_TICKS) {
-            this.entity.getJumpControl().jump();
-            this.lastRecoveryJumpTick = gameTime;
-        }
-
-        float yawRadians = this.entity.getYRot() * ((float) Math.PI / 180.0F);
-        double side = (sample.stuckTicks() / LOCAL_RECOVERY_TICKS) % 2 == 0 ? 0.55D : -0.55D;
-        double offsetX = Mth.cos(yawRadians) * side;
-        double offsetZ = -Mth.sin(yawRadians) * side;
-        Vec3 sidestep = this.entity.position().add(offsetX, 0.0D, offsetZ);
-        this.entity.runtimeClearWasdOverride();
-        this.entity.getMoveControl().setWantedPosition(sidestep.x, sidestep.y, sidestep.z, 0.92D);
-
-        if (sample.stuckTicks() >= LOCAL_REPOSITION_TICKS && this.targetPos != null) {
-            BlockPos localStandPos = this.entity.runtimeResolveMovementTarget(this.targetPos);
-            if (localStandPos != null && !localStandPos.equals(this.targetPos)) {
-                this.targetPos = localStandPos.immutable();
-                applyNewPath(List.of(PathNode.move(Vec3.atCenterOf(localStandPos))), gameTime);
-                this.pathStatus = "切换到局部可站立点";
-            }
-        }
-
-        if ((sample.stuckTicks() >= REPLAN_TICKS || stuckSummary.severe()) && this.targetPos != null) {
-            if (!this.pathCooldown.canAttemptSevereReplan(gameTime)) {
-                this.pathStatus = "等待重算退避窗口";
-                return;
-            }
-            if (TeamKnowledge.tryAcquirePathBudget(this.entity, gameTime)) {
-                List<PathNode> replanned = AgentPathPlanner.plan(this.entity, this.targetPos);
-                if (replanned.isEmpty()) {
-                    replanned = List.of(PathNode.move(Vec3.atCenterOf(this.targetPos)));
-                    this.pathStatus = "重算失败，改为直控逼近";
-                } else {
-                    this.pathStatus = "路径重算完成";
-                }
-                this.pathState = PathState.REPATH;
-                applyNewPath(replanned, gameTime);
-                this.pathCooldown.markSevereReplan(gameTime);
-            } else {
-                this.pathStatus = "团队路径预算忙，等待重算窗口";
-            }
-        }
-    }
-
-    private boolean tryHandleNodeAction(PathNode node, long gameTime) {
-        if (node == null || node.action() == PathNodeAction.NONE || node.actionPos() == null) {
-            return true;
-        }
-        BlockPos actionPos = node.actionPos();
-        double actionDistanceSqr = node.action() == PathNodeAction.BREAK_BLOCK ? 20.25D : 16.0D;
-        boolean nearAction = this.entity.runtimeIsWithin(actionPos, actionDistanceSqr);
-        if (!nearAction) {
-            applyMoveToward(Vec3.atCenterOf(actionPos), 0.92D, node.jumpRequired(), gameTime);
-            this.pathStatus = "接近路径动作点";
-            return false;
-        }
-
-        if (node.action() == PathNodeAction.BREAK_BLOCK && !this.entity.runtimeCanHarvestFromHere(actionPos)) {
-            applyMoveToward(Vec3.atCenterOf(actionPos), 0.85D, true, gameTime);
-            this.pathStatus = "清障点进入开挖距离";
-            return false;
-        }
-
-        if (gameTime - this.lastNodeActionTick < NODE_ACTION_COOLDOWN_TICKS) {
-            this.pathStatus = "动作冷却中";
-            applyMoveToward(Vec3.atCenterOf(actionPos), 0.62D, false, gameTime);
-            return false;
-        }
-        this.lastNodeActionTick = gameTime;
-
-        return switch (node.action()) {
-            case BREAK_BLOCK -> {
-                boolean done = !this.entity.runtimeCanBreakPathBlock(actionPos) || this.entity.runtimeBreakPathNavigationBlock(actionPos);
-                if (!done) {
-                    this.pathStatus = "路径清障中";
-                }
-                yield done;
-            }
-            case PLACE_SUPPORT -> {
-                boolean done = !this.entity.runtimeCanPlacePathSupport(actionPos) || this.entity.runtimePlacePathSupport(actionPos);
-                if (!done) {
-                    this.pathStatus = "路径搭桥中";
-                }
-                yield done;
-            }
-            case JUMP_ASCEND -> true;
-            case NONE -> true;
-        };
-    }
-
-    private void applyMoveToward(Vec3 waypoint, double speedHint, boolean jump, long gameTime) {
-        Vec3 current = this.entity.position();
-        double dx = waypoint.x - current.x;
-        double dz = waypoint.z - current.z;
-        double horizontalDistanceSqr = dx * dx + dz * dz;
-        if (horizontalDistanceSqr < 1.0E-4D) {
-            this.entity.runtimeClearWasdOverride();
-            this.entity.setZza(0.0F);
-            this.entity.setXxa(0.0F);
-            this.entity.setSpeed(0.0F);
-            this.entity.setSprinting(false);
-            return;
-        }
-
-        this.entity.runtimeClearWasdOverride();
-        double moveSpeed = Mth.clamp(speedHint <= 0.0D ? 0.82D : speedHint, 0.55D, 1.35D);
-        if (horizontalDistanceSqr < 0.20D) {
-            moveSpeed = Math.min(moveSpeed, 0.72D);
-        }
-        this.entity.getMoveControl().setWantedPosition(waypoint.x, waypoint.y, waypoint.z, moveSpeed);
-
-        boolean shouldJump = (jump && this.entity.onGround() && (waypoint.y - current.y > 0.2D || this.entity.horizontalCollision))
-                || (waypoint.y - current.y > 0.52D && this.entity.onGround());
-        if (this.entity.runtimeHasLowCeiling()) {
-            shouldJump = false;
-        }
-        if (this.entity.isInWater() || this.entity.isUnderWater() || this.entity.isInLava()) {
-            shouldJump = this.entity.isUnderWater()
-                    || this.entity.horizontalCollision
-                    || waypoint.y > current.y + 0.35D;
-        }
-        if (shouldJump && gameTime - this.lastRecoveryJumpTick >= RECOVERY_JUMP_COOLDOWN_TICKS / 2) {
-            this.entity.getJumpControl().jump();
-            this.lastRecoveryJumpTick = gameTime;
-        }
-    }
-
-    private void driveDirectFallback(long gameTime) {
-        if (this.targetPos == null) {
-            return;
-        }
-        BlockPos resolved = this.entity.runtimeResolveMovementTarget(this.targetPos);
-        Vec3 fallback = Vec3.atCenterOf(resolved != null ? resolved : this.targetPos);
-        detectStuckAndRecover(fallback, gameTime);
-        if (this.targetPos == null) {
-            return;
-        }
-        double distance = this.entity.distanceToSqr(fallback);
-        double speedHint = Math.max(0.82D, computeAppliedSpeed(distance));
-        boolean shouldJump = this.entity.horizontalCollision || fallback.y - this.entity.getY() > 0.48D;
-        applyMoveToward(fallback, speedHint, shouldJump, gameTime);
-        this.pathState = PathState.MOVING;
-        this.pathStatus = "路径空闲兜底：直控逼近目标";
-    }
-
-    private void handleSpinRecovery(long gameTime) {
-        if (this.targetPos == null) {
-            return;
-        }
-        BlockPos resolved = this.entity.runtimeResolveMovementTarget(this.targetPos);
-        if (resolved != null) {
-            this.targetPos = resolved.immutable();
-            applyNewPath(List.of(PathNode.move(Vec3.atCenterOf(resolved))), gameTime);
-            this.pathState = PathState.REPATH;
-            this.pathStatus = "检测到原地转圈，重置为局部直控路径";
-        } else {
-            this.activePath = List.of();
-            this.pathState = PathState.STUCK;
-            this.pathStatus = "检测到原地转圈，等待重算路径";
-        }
-        this.stuckDetector.setStuckAtLeast(LOCAL_RECOVERY_TICKS);
-    }
-
-    private boolean tryDiggableAdvance(long gameTime, String statusMessage) {
-        if (this.targetPos == null) {
-            return false;
-        }
-        if (gameTime - this.lastDiggableAttemptTick < DIGGABLE_RETRY_COOLDOWN_TICKS) {
-            return false;
-        }
-        this.lastDiggableAttemptTick = gameTime;
-        if (!this.entity.runtimeTryDiggableAdvance(this.targetPos)) {
-            return false;
-        }
+    private void beginRecovery(String statusMessage) {
+        this.recoveryTicks = LOCAL_RECOVERY_TICKS;
         this.pathState = PathState.STUCK;
         this.pathStatus = statusMessage;
-        return true;
+        this.movementExecutor.clearInput();
     }
 
-    private boolean isNearWaypoint(Vec3 waypoint, double maxXzDistanceSqr, double maxYAbs) {
-        double dx = waypoint.x - this.entity.getX();
-        double dz = waypoint.z - this.entity.getZ();
-        if (dx * dx + dz * dz > maxXzDistanceSqr) {
-            return false;
+    private void tickRecovery() {
+        this.pathState = PathState.STUCK;
+        if (this.recoveryTicks > 2) {
+            Vec3 target = this.targetPos == null ? this.entity.position().add(this.entity.getLookAngle()) : Vec3.atCenterOf(this.targetPos);
+            double dx = target.x - this.entity.getX();
+            double dz = target.z - this.entity.getZ();
+            float targetYaw = (float) (Mth.atan2(dz, dx) * (180.0D / Math.PI)) - 90.0F;
+            this.entity.runtimeSetWasdControl(-0.65F, 0.0F, 0.2F, targetYaw, false, this.entity.horizontalCollision);
+            this.pathStatus = "AntiStuck：微退一步";
+        } else if (this.recoveryTicks == 2) {
+            this.movementExecutor.clearInput();
+            this.pathingBehavior.forceRepath("anti_stuck_repath");
+            this.pathState = PathState.REPATH;
+            this.pathStatus = "AntiStuck：重新规划路径";
+        } else {
+            this.pathStatus = "AntiStuck：恢复完成";
         }
-        return Math.abs(waypoint.y - this.entity.getY()) <= maxYAbs;
+        this.recoveryTicks--;
+        if (this.recoveryTicks <= 0) {
+            this.movementExecutor.clearInput();
+        }
     }
 
-    private PathPlan buildPlan(BlockPos target, List<PathNode> nodes, String status) {
-        if (nodes == null || nodes.isEmpty()) {
-            return new PathPlan(target, List.of(), status);
+    private void updatePlanFromBehavior() {
+        Path path = this.pathingBehavior.getCurrentPath();
+        String movementName = "none";
+        PathExecutor executor = this.pathingBehavior.getCurrent();
+        if (executor != null && executor.currentMovement() != null) {
+            movementName = executor.currentMovement().name();
         }
-        List<PathStep> steps = new java.util.ArrayList<>(nodes.size());
-        PathNode previous = null;
-        for (PathNode node : nodes) {
-            if (node == null || node.position() == null) {
-                continue;
-            }
-            steps.add(new PathStep(node.position(), resolvePrimitive(previous, node), node.actionPos(), node.jumpRequired()));
-            previous = node;
+        if (this.targetGoal == null) {
+            this.currentPlan = new PathPlan(this.targetPos, java.util.List.of(), "idle");
+            this.pathState = PathState.IDLE;
+            return;
         }
-        return new PathPlan(target, steps, status);
+        if (this.pathingBehavior.isRepathing()) {
+            this.pathState = PathState.PATHING;
+        } else if (this.recoveryTicks > 0 || this.lastStuckSummary.recoverNeeded()) {
+            this.pathState = PathState.STUCK;
+        } else if (executor != null && !executor.finished() && !executor.failed()) {
+            this.pathState = PathState.MOVING;
+        } else if (this.pathingBehavior.failed()) {
+            this.pathState = PathState.STUCK;
+        } else {
+            this.pathState = PathState.PATHING;
+        }
+        this.pathStatus = "goal=" + (this.targetPos == null ? "none" : this.targetPos.toShortString())
+                + ",movement=" + movementName
+                + ",calc=" + this.pathingBehavior.lastCalculation().type().name()
+                + ",repath=" + this.pathingBehavior.repathReason()
+                + ",state=" + this.pathingBehavior.status();
+        this.currentPlan = AgentPathPlanner.toPlan(this.targetPos, path, this.pathStatus);
     }
 
-    private PathPrimitive resolvePrimitive(PathNode previous, PathNode current) {
-        if (current == null) {
-            return PathPrimitive.WALK;
+    private PathNode toPathNode(Movement movement) {
+        if (movement == null) {
+            return null;
         }
-        if (current.action() == PathNodeAction.BREAK_BLOCK) {
-            return PathPrimitive.BREAK;
+        return PathNode.withAction(
+                Vec3.atCenterOf(movement.getDest()),
+                this.resolveAction(movement),
+                movement.getActionPos(),
+                movement.jumpRequired());
+    }
+
+    private PathNodeAction resolveAction(Movement movement) {
+        if (movement == null) {
+            return PathNodeAction.NONE;
         }
-        if (current.action() == PathNodeAction.PLACE_SUPPORT) {
-            return PathPrimitive.PLACE;
+        String name = movement.name();
+        if (name.contains("Break")) {
+            return PathNodeAction.BREAK_BLOCK;
         }
-        if (current.action() == PathNodeAction.JUMP_ASCEND || current.jumpRequired()) {
-            return PathPrimitive.JUMP;
+        if (name.contains("Place")) {
+            return PathNodeAction.PLACE_SUPPORT;
         }
-        if (previous == null || previous.position() == null || current.position() == null) {
-            return PathPrimitive.WALK;
+        if (movement.jumpRequired()) {
+            return PathNodeAction.JUMP_ASCEND;
         }
-        double dx = current.position().x - previous.position().x;
-        double dy = current.position().y - previous.position().y;
-        double dz = current.position().z - previous.position().z;
-        if (Math.abs(dx) > 0.2D && Math.abs(dz) > 0.2D) {
-            return PathPrimitive.DIAGONAL;
-        }
-        if (dy > 0.2D) {
-            return PathPrimitive.ASCEND;
-        }
-        if (dy < -0.2D) {
-            return PathPrimitive.DESCEND;
-        }
-        return PathPrimitive.WALK;
+        return PathNodeAction.NONE;
     }
 
     private enum PathState {
