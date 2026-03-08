@@ -635,6 +635,7 @@ public class AIPlayerEntity extends PathfinderMob {
             case STOP -> {
                 this.clearPlayerModePin();
                 this.clearTaskAiPlanState();
+                this.clearHuntDirective();
                 this.setMode(AIPlayerMode.IDLE);
                 return "已停止当前任务，进入待命。";
             }
@@ -876,10 +877,29 @@ public class AIPlayerEntity extends PathfinderMob {
         return this.huntTargetId != null && !this.huntTargetId.isBlank();
     }
 
+    private void equipHuntCombatLoadout() {
+        if (!this.hasActiveHuntDirective()) {
+            return;
+        }
+        String requirement = KnowledgeManager.getPreferredWeaponForMobId(this.huntTargetId);
+        ItemStack preferred = this.findBestToolForRequirement(requirement);
+        if (preferred.isEmpty()) {
+            preferred = this.findBestToolForRequirement("sword");
+        }
+        if (preferred.isEmpty()) {
+            preferred = this.findBestCombatItem();
+        }
+        if (!preferred.isEmpty()) {
+            this.setItemSlot(EquipmentSlot.MAINHAND, preferred.copy());
+        }
+        this.ensureShieldInOffhand();
+    }
+
     private boolean performHuntDirective() {
         if (!this.hasActiveHuntDirective()) {
             return false;
         }
+        this.equipHuntCombatLoadout();
         if (this.observedHostile != null && this.observedHostile.isAlive() && this.distanceToSqr(this.observedHostile) <= 49.0D) {
             return false;
         }
@@ -1214,6 +1234,14 @@ public class AIPlayerEntity extends PathfinderMob {
 
     private void runModeLogic() {
         this.autoMaintainSurvival();
+        if (this.hasActiveHuntDirective()) {
+            if (this.autoRecoverFromHazards()) {
+                return;
+            }
+            if (this.performHuntDirective()) {
+                return;
+            }
+        }
 
         if (this.autoRecoverFromHazards()) {
             return;
@@ -1249,11 +1277,17 @@ public class AIPlayerEntity extends PathfinderMob {
 
     private void autoMaintainSurvival() {
         this.autoSortBackpack();
-        this.autoEquipBestAvailableGear();
+        if (this.hasActiveHuntDirective()) {
+            this.equipHuntCombatLoadout();
+        } else {
+            this.autoEquipBestAvailableGear();
+        }
         this.tryCraftBread();
         this.tryCraftTorchBundle();
-        this.tryCraftStoneTool(Items.STONE_AXE, "石斧");
-        this.tryCraftStoneTool(Items.STONE_PICKAXE, "石镐");
+        if (!this.hasActiveHuntDirective()) {
+            this.tryCraftStoneTool(Items.STONE_AXE, "石斧");
+            this.tryCraftStoneTool(Items.STONE_PICKAXE, "石镐");
+        }
         this.shareResourcesWithTeammates();
 
         ItemStack food = this.findBestRecoveryFood();
@@ -5034,6 +5068,9 @@ public class AIPlayerEntity extends PathfinderMob {
             this.setTarget(this.observedHostile);
         }
         this.tickSelfDefense();
+        if (this.hasActiveHuntDirective()) {
+            this.performHuntDirective();
+        }
     }
 
     private void tickSelfDefense() {
@@ -5181,6 +5218,18 @@ public class AIPlayerEntity extends PathfinderMob {
         this.setMode(AIPlayerMode.IDLE);
     }
 
+    boolean runtimeHasActiveHuntDirective() {
+        return this.hasActiveHuntDirective();
+    }
+
+    boolean runtimePerformHuntDirective() {
+        return this.performHuntDirective();
+    }
+
+    String runtimeHuntTargetLabel() {
+        return this.huntTargetLabel == null ? "" : this.huntTargetLabel;
+    }
+
     String runtimeHandleDeliveryRequest(ServerPlayer speaker, String content) {
         return this.handleDeliveryRequest(speaker, content);
     }
@@ -5310,6 +5359,10 @@ public class AIPlayerEntity extends PathfinderMob {
     }
 
     boolean runtimePrepareHarvestTool(boolean woodTask) {
+        if (this.hasActiveHuntDirective()) {
+            this.equipHuntCombatLoadout();
+            return true;
+        }
         ItemStack preferred = woodTask
                 ? this.findBestToolInBackpack(this::isAxeItem, Items.STONE_AXE)
                 : this.findBestToolInBackpack(this::isPickaxeItem, Items.STONE_PICKAXE);
@@ -5371,6 +5424,9 @@ public class AIPlayerEntity extends PathfinderMob {
     }
 
     boolean runtimeCraftBasicTools() {
+        if (this.hasActiveHuntDirective()) {
+            return false;
+        }
         return this.tryCraftStoneTool(Items.STONE_AXE, "石斧") | this.tryCraftStoneTool(Items.STONE_PICKAXE, "石镐");
     }
 

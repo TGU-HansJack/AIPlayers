@@ -3,6 +3,7 @@ package com.mcmod.aiplayers.entity;
 import com.mcmod.aiplayers.ai.AIGoalPlanResponse;
 import com.mcmod.aiplayers.ai.AIServiceManager;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerPlayer;
@@ -45,6 +46,11 @@ final class AgentRuntime {
     }
 
     void tickPlanner() {
+        if (this.entity.runtimeHasActiveHuntDirective()) {
+            this.applyHuntDirectiveState();
+            this.entity.runtimeApplyGoalSummary(this.currentGoal, this.currentPlan, this.currentActionLabel, this.plannerStatus, this.movementController.getPathStatus(), this.memory);
+            return;
+        }
         WorldStateSnapshot state = this.entity.captureWorldStateSnapshot();
         AgentGoal lockedHarvestGoal = this.entity.runtimeHarvestTaskLockGoal();
         AgentGoal localGoal = lockedHarvestGoal != null ? lockedHarvestGoal : GoalSelector.select(this.entity, state, this.memory);
@@ -76,6 +82,11 @@ final class AgentRuntime {
     }
 
     void tickExecutor() {
+        if (this.entity.runtimeHasActiveHuntDirective()) {
+            this.applyHuntDirectiveState();
+            this.entity.runtimePerformHuntDirective();
+            return;
+        }
         if (this.currentPlan.actions().isEmpty()) {
             return;
         }
@@ -110,6 +121,18 @@ final class AgentRuntime {
             this.forceReplan = true;
         }
         this.entity.runtimeApplyGoalSummary(this.currentGoal, this.currentPlan, this.currentActionLabel, this.plannerStatus, this.movementController.getPathStatus(), this.memory);
+    }
+
+    private void applyHuntDirectiveState() {
+        String huntLabel = this.entity.runtimeHuntTargetLabel();
+        String reason = (huntLabel == null || huntLabel.isBlank()) ? "玩家狩猎指令" : "玩家狩猎指令：" + huntLabel;
+        this.currentGoal = AgentGoal.of(GoalType.SURVIVE, "player_hunt", reason);
+        this.currentPlan = new GoalPlan(this.currentGoal, List.of(), reason, "hunt-directive");
+        this.currentActionIndex = 0;
+        this.currentActionLabel = huntLabel == null || huntLabel.isBlank() ? "狩猎中" : ("狩猎 " + huntLabel);
+        this.forceReplan = false;
+        this.llmGoal = null;
+        this.plannerStatus = "狩猎指令接管中";
     }
 
     void applyDirectedGoal(ServerPlayer speaker, AgentGoal goal, boolean pin) {

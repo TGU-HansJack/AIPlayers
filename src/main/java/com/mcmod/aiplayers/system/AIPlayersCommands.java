@@ -5,6 +5,7 @@ import com.mcmod.aiplayers.entity.AIPlayerAction;
 import com.mcmod.aiplayers.entity.AgentConfigManager;
 import com.mcmod.aiplayers.entity.AIPlayerEntity;
 import com.mcmod.aiplayers.entity.AIPlayerMode;
+import com.mcmod.aiplayers.entity.AnimalTargetHelper;
 import com.mcmod.aiplayers.knowledge.KnowledgeManager;
 import com.mcmod.aiplayers.system.BlueprintRegistry;
 import com.mcmod.aiplayers.registry.ModEntities;
@@ -32,6 +33,8 @@ public final class AIPlayersCommands {
     private static final SimpleCommandExceptionType NOT_AN_AI_PLAYER = new SimpleCommandExceptionType(Component.literal("目标不是 AI Players 实体。"));
     private static final SimpleCommandExceptionType INVALID_MODE = new SimpleCommandExceptionType(Component.literal("未知模式。可用模式：idle, follow, guard, gather_wood, mine, explore, build_shelter, survive"));
     private static final SimpleCommandExceptionType INVALID_ACTION = new SimpleCommandExceptionType(Component.literal("未知动作。可用动作：jump, crouch, stand, look_up, look_down, look_owner, recover"));
+    private static final SimpleCommandExceptionType INVALID_HUNT_TARGET = new SimpleCommandExceptionType(Component.literal("无法识别目标动物。请使用原版生物名称，例如 cow、pig、sheep。"));
+    private static final SimpleCommandExceptionType NO_OWNED_AI_PLAYER = new SimpleCommandExceptionType(Component.literal("附近未找到可控制的 AI 玩家。"));
 
     private AIPlayersCommands() {
     }
@@ -52,6 +55,11 @@ public final class AIPlayersCommands {
                                 .then(Commands.argument("action", StringArgumentType.word())
                                         .suggests(AIPlayersCommands::suggestActions)
                                         .executes(AIPlayersCommands::performAction))))
+                .then(Commands.literal("hunt")
+                        .then(Commands.argument("targets", EntityArgument.entities())
+                                .then(Commands.argument("animal", StringArgumentType.greedyString())
+                                        .suggests(AIPlayersCommands::suggestHuntTargets)
+                                        .executes(AIPlayersCommands::huntTargets))))
                 .then(Commands.literal("status")
                         .then(Commands.argument("target", EntityArgument.entity())
                                 .executes(AIPlayersCommands::status)))
@@ -77,6 +85,11 @@ public final class AIPlayersCommands {
                 .then(Commands.literal("knowledge")
                         .then(Commands.literal("reload").executes(AIPlayersCommands::knowledgeReload))
                         .then(Commands.literal("status").executes(AIPlayersCommands::knowledgeStatus))));
+        dispatcher.register(Commands.literal("ai")
+                .then(Commands.literal("hunt")
+                        .then(Commands.argument("animal", StringArgumentType.greedyString())
+                                .suggests(AIPlayersCommands::suggestHuntTargets)
+                                .executes(AIPlayersCommands::huntNearestOwned))));
     }
 
     private static int spawn(CommandContext<CommandSourceStack> context, String name) throws CommandSyntaxException {
@@ -136,6 +149,46 @@ public final class AIPlayersCommands {
         int updatedCount = updated;
         context.getSource().sendSuccess(() -> Component.literal("已让 " + updatedCount + " 个 AI 玩家执行动作：" + action.displayName()), true);
         return updated;
+    }
+
+    private static int huntTargets(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        AnimalTargetHelper.HuntTarget huntTarget = AnimalTargetHelper.resolveHuntTarget(StringArgumentType.getString(context, "animal"));
+        if (huntTarget == null) {
+            throw INVALID_HUNT_TARGET.create();
+        }
+        List<AIPlayerEntity> companions = resolveCompanions(context, "targets");
+        ServerPlayer commander = context.getSource().getEntity() instanceof ServerPlayer player ? player : null;
+        int updated = 0;
+        for (AIPlayerEntity companion : companions) {
+            if (commander != null && !companion.canReceiveOrdersFrom(commander)) {
+                continue;
+            }
+            companion.startAnimalHunt(commander, huntTarget.targetId(), huntTarget.label());
+            updated++;
+        }
+        int updatedCount = updated;
+        context.getSource().sendSuccess(() -> Component.literal("已下达狩猎指令：攻击" + huntTarget.label() + "（" + updatedCount + " 个 AI）"), true);
+        return updated;
+    }
+
+    private static int huntNearestOwned(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        ServerPlayer commander = context.getSource().getPlayerOrException();
+        AnimalTargetHelper.HuntTarget huntTarget = AnimalTargetHelper.resolveHuntTarget(StringArgumentType.getString(context, "animal"));
+        if (huntTarget == null) {
+            throw INVALID_HUNT_TARGET.create();
+        }
+        AIPlayerEntity nearest = commander.level()
+                .getEntitiesOfClass(AIPlayerEntity.class, commander.getBoundingBox().inflate(64.0D), companion -> companion.canReceiveOrdersFrom(commander))
+                .stream()
+                .min((left, right) -> Double.compare(commander.distanceToSqr(left), commander.distanceToSqr(right)))
+                .orElse(null);
+        if (nearest == null) {
+            throw NO_OWNED_AI_PLAYER.create();
+        }
+
+        nearest.startAnimalHunt(commander, huntTarget.targetId(), huntTarget.label());
+        context.getSource().sendSuccess(() -> Component.literal("已命令 " + nearest.getAIName() + " 狩猎：" + huntTarget.label()), false);
+        return 1;
     }
 
     private static int status(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
@@ -239,5 +292,9 @@ public final class AIPlayersCommands {
 
     private static CompletableFuture<Suggestions> suggestBlueprints(CommandContext<CommandSourceStack> context, SuggestionsBuilder builder) {
         return SharedSuggestionProvider.suggest(BlueprintRegistry.ids(), builder);
+    }
+
+    private static CompletableFuture<Suggestions> suggestHuntTargets(CommandContext<CommandSourceStack> context, SuggestionsBuilder builder) {
+        return SharedSuggestionProvider.suggest(AnimalTargetHelper.huntCommandSuggestions(), builder);
     }
 }

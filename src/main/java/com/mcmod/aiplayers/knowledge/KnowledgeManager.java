@@ -38,8 +38,11 @@ public final class KnowledgeManager {
     private static final Map<String, ToolKnowledge> TOOLS = new HashMap<>();
     private static final Map<String, RecipeKnowledge> RECIPES = new HashMap<>();
     private static final Map<String, MobKnowledge> MOBS = new HashMap<>();
+    private static final Map<String, String> MOB_ALIASES = new HashMap<>();
+    private static final Map<String, String> MOB_DISPLAY_NAMES = new HashMap<>();
     private static final Set<String> TREE_LOGS = new HashSet<>();
     private static final Set<String> TREE_LEAVES = new HashSet<>();
+    private static final Set<String> HUNTABLE_MOBS = new LinkedHashSet<>();
 
     private static boolean initialized;
 
@@ -64,8 +67,11 @@ public final class KnowledgeManager {
         TOOLS.clear();
         RECIPES.clear();
         MOBS.clear();
+        MOB_ALIASES.clear();
+        MOB_DISPLAY_NAMES.clear();
         TREE_LOGS.clear();
         TREE_LEAVES.clear();
+        HUNTABLE_MOBS.clear();
 
         loadBlocks();
         loadTrees();
@@ -130,6 +136,7 @@ public final class KnowledgeManager {
                 + ", tools=" + TOOLS.size()
                 + ", recipes=" + RECIPES.size()
                 + ", mobs=" + MOBS.size()
+                + ", huntableMobs=" + HUNTABLE_MOBS.size()
                 + ", treeLogs=" + TREE_LOGS.size()
                 + ", treeLeaves=" + TREE_LEAVES.size();
     }
@@ -282,6 +289,83 @@ public final class KnowledgeManager {
         return knowledge.preferredWeapon();
     }
 
+    public static String getPreferredWeaponForMobId(String targetId) {
+        ensureInitialized();
+        String fullId = normalizeMobId(targetId);
+        if (fullId.isBlank()) {
+            return "";
+        }
+        MobKnowledge knowledge = MOBS.get(fullId);
+        if (knowledge == null || knowledge.preferredWeapon() == null) {
+            return "";
+        }
+        return knowledge.preferredWeapon();
+    }
+
+    public static boolean matchesRequestedMob(LivingEntity entity, String targetId) {
+        ensureInitialized();
+        if (entity == null || !entity.isAlive() || targetId == null || targetId.isBlank()) {
+            return false;
+        }
+        Identifier key = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType());
+        if (key == null) {
+            return false;
+        }
+        String entityPath = key.getPath().toLowerCase(Locale.ROOT);
+        String resolvedTargetPath = toMobPath(normalizeMobId(targetId));
+        return !resolvedTargetPath.isBlank() && resolvedTargetPath.equals(entityPath);
+    }
+
+    public static String resolveHuntTargetId(String content) {
+        ensureInitialized();
+        if (content == null || content.isBlank()) {
+            return "";
+        }
+        String normalized = normalizeText(content);
+        String best = "";
+        int bestLength = -1;
+        for (Map.Entry<String, String> alias : MOB_ALIASES.entrySet()) {
+            if (!normalized.contains(alias.getKey()) || !HUNTABLE_MOBS.contains(alias.getValue())) {
+                continue;
+            }
+            if (alias.getKey().length() > bestLength) {
+                bestLength = alias.getKey().length();
+                best = alias.getValue();
+            }
+        }
+        return best;
+    }
+
+    public static List<String> getHuntableMobTargets() {
+        ensureInitialized();
+        return new ArrayList<>(HUNTABLE_MOBS);
+    }
+
+    public static String getSupportedHuntAnimalsSummary() {
+        ensureInitialized();
+        if (HUNTABLE_MOBS.isEmpty()) {
+            return "牛 / 猪 / 羊 / 鸡 / 兔子";
+        }
+        List<String> labels = new ArrayList<>();
+        for (String targetId : HUNTABLE_MOBS) {
+            labels.add(getMobDisplayName(targetId));
+            if (labels.size() >= 16) {
+                break;
+            }
+        }
+        return String.join(" / ", labels);
+    }
+
+    public static String getMobDisplayName(String targetId) {
+        ensureInitialized();
+        String mobPath = toMobPath(normalizeMobId(targetId));
+        if (mobPath.isBlank()) {
+            return targetId == null ? "" : targetId;
+        }
+        String display = MOB_DISPLAY_NAMES.get(mobPath);
+        return display == null || display.isBlank() ? mobPath : display;
+    }
+
     public static String getMobWeaknessHint(LivingEntity entity) {
         MobKnowledge knowledge = getMobKnowledge(entity);
         if (knowledge == null) {
@@ -361,6 +445,48 @@ public final class KnowledgeManager {
         return split >= 0 ? id.substring(split + 1) : id;
     }
 
+    private static String normalizeMobId(String targetId) {
+        if (targetId == null || targetId.isBlank()) {
+            return "";
+        }
+        String normalized = targetId.toLowerCase(Locale.ROOT).trim();
+        if (normalized.startsWith("minecraft:")) {
+            return normalized;
+        }
+        if (normalized.contains(":")) {
+            return normalized;
+        }
+        return "minecraft:" + normalized;
+    }
+
+    private static String toMobPath(String mobId) {
+        if (mobId == null || mobId.isBlank()) {
+            return "";
+        }
+        int split = mobId.indexOf(':');
+        return split >= 0 ? mobId.substring(split + 1) : mobId;
+    }
+
+    private static String normalizeText(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        return text.toLowerCase(Locale.ROOT)
+                .replace('_', ' ')
+                .replace('-', ' ')
+                .replace('、', ' ')
+                .replace('，', ' ')
+                .replace('。', ' ')
+                .replace('！', ' ')
+                .replace('？', ' ')
+                .replace(':', ' ')
+                .replace('：', ' ')
+                .replace(';', ' ')
+                .replace('；', ' ')
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
     private static void ensureInitialized() {
         if (!initialized) {
             initialize();
@@ -376,30 +502,37 @@ public final class KnowledgeManager {
     }
 
     private static JsonObject readObject(String resourcePath) {
-        Path externalPath = EXTERNAL_KNOWLEDGE_DIR.resolve(resourcePath.substring(resourcePath.lastIndexOf('/') + 1));
-        if (Files.isRegularFile(externalPath)) {
-            try (InputStreamReader reader = new InputStreamReader(Files.newInputStream(externalPath), StandardCharsets.UTF_8)) {
-                JsonElement parsed = JsonParser.parseReader(reader);
-                return parsed != null && parsed.isJsonObject() ? parsed.getAsJsonObject() : new JsonObject();
-            } catch (Exception exception) {
-                AIPlayersMod.LOGGER.warn("Failed to load external knowledge resource {}", externalPath, exception);
-            }
-        }
-
+        JsonObject merged = new JsonObject();
         ClassLoader classLoader = KnowledgeManager.class.getClassLoader();
         try (InputStream stream = classLoader.getResourceAsStream(resourcePath)) {
             if (stream == null) {
                 AIPlayersMod.LOGGER.warn("Knowledge resource missing: {}", resourcePath);
-                return new JsonObject();
-            }
-            try (InputStreamReader reader = new InputStreamReader(stream, StandardCharsets.UTF_8)) {
-                JsonElement parsed = JsonParser.parseReader(reader);
-                return parsed != null && parsed.isJsonObject() ? parsed.getAsJsonObject() : new JsonObject();
+            } else {
+                try (InputStreamReader reader = new InputStreamReader(stream, StandardCharsets.UTF_8)) {
+                    JsonElement parsed = JsonParser.parseReader(reader);
+                    if (parsed != null && parsed.isJsonObject()) {
+                        merged = parsed.getAsJsonObject();
+                    }
+                }
             }
         } catch (Exception exception) {
             AIPlayersMod.LOGGER.warn("Failed to load knowledge resource {}", resourcePath, exception);
-            return new JsonObject();
         }
+
+        Path externalPath = EXTERNAL_KNOWLEDGE_DIR.resolve(resourcePath.substring(resourcePath.lastIndexOf('/') + 1));
+        if (Files.isRegularFile(externalPath)) {
+            try (InputStreamReader reader = new InputStreamReader(Files.newInputStream(externalPath), StandardCharsets.UTF_8)) {
+                JsonElement parsed = JsonParser.parseReader(reader);
+                if (parsed != null && parsed.isJsonObject()) {
+                    for (Map.Entry<String, JsonElement> entry : parsed.getAsJsonObject().entrySet()) {
+                        merged.add(entry.getKey(), entry.getValue());
+                    }
+                }
+            } catch (Exception exception) {
+                AIPlayersMod.LOGGER.warn("Failed to load external knowledge resource {}", externalPath, exception);
+            }
+        }
+        return merged;
     }
 
     private static void loadBlocks() {
@@ -516,6 +649,11 @@ public final class KnowledgeManager {
             if (mob == null) {
                 continue;
             }
+            String mobId = normalizeMobId(entry.getKey());
+            if (mobId.isBlank()) {
+                continue;
+            }
+            String mobPath = toMobPath(mobId);
             Set<String> weaknesses = new HashSet<>();
             if (mob.weaknessTags() != null) {
                 for (String weakness : mob.weaknessTags()) {
@@ -524,13 +662,39 @@ public final class KnowledgeManager {
                     }
                 }
             }
+            Set<String> aliases = new HashSet<>();
+            if (mob.aliases() != null) {
+                for (String alias : mob.aliases()) {
+                    if (alias != null && !alias.isBlank()) {
+                        aliases.add(alias.toLowerCase(Locale.ROOT));
+                    }
+                }
+            }
             String preferredWeapon = mob.preferredWeapon() == null ? "" : mob.preferredWeapon().toLowerCase(Locale.ROOT);
-            MOBS.put(entry.getKey().toLowerCase(Locale.ROOT), new MobKnowledge(
+            String displayName = mob.displayName() == null || mob.displayName().isBlank() ? mobPath : mob.displayName();
+            boolean huntable = Boolean.TRUE.equals(mob.huntable());
+
+            MOBS.put(mobId, new MobKnowledge(
                     mob.family(),
                     preferredWeapon,
                     weaknesses,
                     mob.danger(),
-                    mob.notes()));
+                    mob.notes(),
+                    displayName,
+                    aliases,
+                    huntable));
+
+            MOB_DISPLAY_NAMES.put(mobPath, displayName);
+            MOB_ALIASES.put(normalizeText(mobPath), mobPath);
+            MOB_ALIASES.put(normalizeText(mobPath.replace('_', ' ')), mobPath);
+            MOB_ALIASES.put(normalizeText(mobId), mobPath);
+            MOB_ALIASES.put(normalizeText(displayName), mobPath);
+            for (String alias : aliases) {
+                MOB_ALIASES.put(normalizeText(alias), mobPath);
+            }
+            if (huntable) {
+                HUNTABLE_MOBS.add(mobPath);
+            }
         }
     }
 
@@ -549,6 +713,14 @@ public final class KnowledgeManager {
     public record RecipeKnowledge(Integer outputCount, Map<String, Integer> inputs, String category, Set<String> requires) {
     }
 
-    public record MobKnowledge(String family, String preferredWeapon, Set<String> weaknessTags, Integer danger, String notes) {
+    public record MobKnowledge(
+            String family,
+            String preferredWeapon,
+            Set<String> weaknessTags,
+            Integer danger,
+            String notes,
+            String displayName,
+            Set<String> aliases,
+            Boolean huntable) {
     }
 }

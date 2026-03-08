@@ -1,36 +1,52 @@
 {
   "minecraft:zombie": {
     "family": "undead",
+    "displayName": "僵尸",
     "preferredWeapon": "sword",
     "weaknessTags": [
       "smite",
       "shield"
     ],
     "danger": 3,
+    "aliases": [
+      "zombie",
+      "僵尸"
+    ],
     "notes": "近战慢速，保持走位并压制。"
   },
   "minecraft:husk": {
     "family": "undead",
+    "displayName": "尸壳",
     "preferredWeapon": "sword",
     "weaknessTags": [
       "smite",
       "shield"
     ],
     "danger": 3,
+    "aliases": [
+      "husk",
+      "尸壳"
+    ],
     "notes": "与僵尸类似，避免长时间贴脸。"
   },
   "minecraft:drowned": {
     "family": "undead",
+    "displayName": "溺尸",
     "preferredWeapon": "sword",
     "weaknessTags": [
       "smite",
       "shield"
     ],
     "danger": 4,
+    "aliases": [
+      "drowned",
+      "溺尸"
+    ],
     "notes": "若持三叉戟优先举盾规避投掷。"
   },
   "minecraft:skeleton": {
     "family": "undead",
+    "displayName": "骷髅",
     "preferredWeapon": "sword",
     "weaknessTags": [
       "smite",
@@ -38,30 +54,45 @@
       "zigzag"
     ],
     "danger": 4,
+    "aliases": [
+      "skeleton",
+      "骷髅"
+    ],
     "notes": "弓箭威胁高，优先蛇形接近。"
   },
   "minecraft:spider": {
     "family": "arthropod",
+    "displayName": "蜘蛛",
     "preferredWeapon": "sword",
     "weaknessTags": [
       "sweeping",
       "knockback"
     ],
     "danger": 3,
+    "aliases": [
+      "spider",
+      "蜘蛛"
+    ],
     "notes": "跳扑频繁，保持正面视角防止绕后。"
   },
   "minecraft:creeper": {
     "family": "explosive",
+    "displayName": "苦力怕",
     "preferredWeapon": "sword",
     "weaknessTags": [
       "distance",
       "shield"
     ],
     "danger": 5,
+    "aliases": [
+      "creeper",
+      "苦力怕"
+    ],
     "notes": "引爆前迅速后撤，避免贴身连锁爆炸。"
   },
   "minecraft:enderman": {
     "family": "teleport",
+    "displayName": "末影人",
     "preferredWeapon": "sword",
     "weaknessTags": [
       "water",
@@ -69,16 +100,341 @@
       "safe_height"
     ],
     "danger": 5,
+    "aliases": [
+      "enderman",
+      "末影人"
+    ],
     "notes": "在水边或低矮空间作战更安全。"
   },
   "minecraft:witch": {
     "family": "magic",
+    "displayName": "女巫",
     "preferredWeapon": "sword",
     "weaknessTags": [
       "burst_damage",
       "gap_close"
     ],
     "danger": 4,
+    "aliases": [
+      "witch",
+      "女巫"
+    ],
     "notes": "避免拉扯过久，优先贴身快速击杀。"
+  },
+  "minecraft:cow": {
+    "family": "animal",
+    "displayName": "牛",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "cow",
+      "cattle",
+      "牛"
+    ]
+  },
+  "minecraft:pig": {
+    "family": "animal",
+    "displayName": "猪",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "pig",
+      "猪"
+    ]
+  },
+  "minecraft:sheep": {
+    "family": "animal",
+    "displayName": "羊",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "sheep",
+      "羊",
+      "绵羊"
+    ]
+  },
+  "minecraft:chicken": {
+    "family": "animal",
+    "displayName": "鸡",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "chicken",
+      "鸡"
+    ]
+  },
+  "minecraft:rabbit": {
+    "family": "animal",
+    "displayName": "兔子",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "rabbit",
+      "兔子",
+      "兔"
+    ]
+  },
+  "minecraft:horse": {
+    "family": "animal",
+    "displayName": "马",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "horse",
+      "马"
+    ]
+  },
+  "minecraft:donkey": {
+    "family": "animal",
+    "displayName": "驴",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "donkey",
+      "驴"
+    ]
+  },
+  "minecraft:mule": {
+    "family": "animal",
+    "displayName": "骡",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "mule",
+      "骡"
+    ]
+  },
+  "minecraft:llama": {
+    "family": "animal",
+    "displayName": "羊驼",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "llama",
+      "羊驼"
+    ]
+  },
+  "minecraft:goat": {
+    "family": "animal",
+    "displayName": "山羊",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "goat",
+      "山羊"
+    ]
+  },
+  "minecraft:bee": {
+    "family": "animal",
+    "displayName": "蜜蜂",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "bee",
+      "蜜蜂"
+    ]
+  },
+  "minecraft:turtle": {
+    "family": "animal",
+    "displayName": "海龟",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "turtle",
+      "海龟"
+    ]
+  },
+  "minecraft:fox": {
+    "family": "animal",
+    "displayName": "狐狸",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "fox",
+      "狐狸"
+    ]
+  },
+  "minecraft:wolf": {
+    "family": "animal",
+    "displayName": "狼",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "wolf",
+      "狼"
+    ]
+  },
+  "minecraft:cat": {
+    "family": "animal",
+    "displayName": "猫",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "cat",
+      "猫"
+    ]
+  },
+  "minecraft:ocelot": {
+    "family": "animal",
+    "displayName": "豹猫",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "ocelot",
+      "豹猫"
+    ]
+  },
+  "minecraft:panda": {
+    "family": "animal",
+    "displayName": "熊猫",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "panda",
+      "熊猫"
+    ]
+  },
+  "minecraft:camel": {
+    "family": "animal",
+    "displayName": "骆驼",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "camel",
+      "骆驼"
+    ]
+  },
+  "minecraft:frog": {
+    "family": "animal",
+    "displayName": "青蛙",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "frog",
+      "青蛙"
+    ]
+  },
+  "minecraft:axolotl": {
+    "family": "animal",
+    "displayName": "美西螈",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "axolotl",
+      "美西螈"
+    ]
+  },
+  "minecraft:squid": {
+    "family": "animal",
+    "displayName": "鱿鱼",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "squid",
+      "鱿鱼"
+    ]
+  },
+  "minecraft:glow_squid": {
+    "family": "animal",
+    "displayName": "发光鱿鱼",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "glow_squid",
+      "glow squid",
+      "发光鱿鱼"
+    ]
+  },
+  "minecraft:salmon": {
+    "family": "animal",
+    "displayName": "鲑鱼",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "salmon",
+      "鲑鱼"
+    ]
+  },
+  "minecraft:cod": {
+    "family": "animal",
+    "displayName": "鳕鱼",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "cod",
+      "鳕鱼"
+    ]
+  },
+  "minecraft:tropical_fish": {
+    "family": "animal",
+    "displayName": "热带鱼",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "tropical_fish",
+      "tropical fish",
+      "热带鱼"
+    ]
+  },
+  "minecraft:pufferfish": {
+    "family": "animal",
+    "displayName": "河豚",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "pufferfish",
+      "河豚"
+    ]
+  },
+  "minecraft:dolphin": {
+    "family": "animal",
+    "displayName": "海豚",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "dolphin",
+      "海豚"
+    ]
+  },
+  "minecraft:strider": {
+    "family": "animal",
+    "displayName": "炽足兽",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "strider",
+      "炽足兽"
+    ]
+  },
+  "minecraft:hoglin": {
+    "family": "animal",
+    "displayName": "疣猪兽",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "hoglin",
+      "疣猪兽"
+    ]
+  },
+  "minecraft:mooshroom": {
+    "family": "animal",
+    "displayName": "哞菇",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "mooshroom",
+      "哞菇",
+      "蘑菇牛"
+    ]
+  },
+  "minecraft:sniffer": {
+    "family": "animal",
+    "displayName": "嗅探兽",
+    "preferredWeapon": "sword",
+    "huntable": true,
+    "aliases": [
+      "sniffer",
+      "嗅探兽"
+    ]
   }
 }
