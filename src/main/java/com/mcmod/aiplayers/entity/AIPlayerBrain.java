@@ -16,6 +16,7 @@ final class AIPlayerBrain {
     private final AgentMemory memory;
     private final PathManager movementController;
     private final AIPlayerBlackboard blackboard = new AIPlayerBlackboard();
+    private final ResourceGatherSystem resourceGatherSystem;
 
     private WorldModelSnapshot worldModel = WorldModelSnapshot.empty();
     private SharedMemorySnapshot sharedMemory = SharedMemorySnapshot.empty();
@@ -39,6 +40,7 @@ final class AIPlayerBrain {
         this.entity = entity;
         this.memory = memory;
         this.movementController = movementController;
+        this.resourceGatherSystem = new ResourceGatherSystem(entity, movementController);
     }
 
     void tickWorldScan() {
@@ -218,10 +220,18 @@ final class AIPlayerBrain {
                     this.memory.noteFailure("LLM Brain 不可用：" + AIServiceManager.getLastStatusText());
                     return;
                 }
-                this.llmPlan = response;
+                ValidatedBrainPlan validated = BrainPlanValidator.validate(response, this.worldModel, this.sharedMemory, request);
+                if (!validated.accepted()) {
+                    this.llmPlan = null;
+                    this.brainPlanValidUntilTick = 0;
+                    this.memory.noteFailure("LLM Brain 计划被拒绝：" + validated.note());
+                    TeamMemoryService.recordFailure(this.entity, "Brain 计划被拒绝：" + validated.note(), this.resolveTarget(response.task() == null ? Map.of() : response.task().args()));
+                    return;
+                }
+                this.llmPlan = validated.plan();
                 this.brainPlanValidUntilTick = this.entity.tickCount + AIServiceManager.getReplanIntervalTicks() * 2;
                 this.forceReplan = true;
-                this.memory.noteLearning("LLM Brain 任务：" + response.task().label());
+                this.memory.noteLearning("LLM Brain 任务：" + this.llmPlan.task().label());
             });
         });
     }
@@ -290,6 +300,13 @@ final class AIPlayerBrain {
         }
         return switch (task.actionType()) {
             case "move_to" -> PlannedAction.move(task.label(), task.args().getOrDefault("target", "explore"), this.resolveTarget(task.args()), parseDouble(task.args(), "speed", 1.0D));
+            case "gather_resource" -> switch (ResourceKind.fromText(task.args().getOrDefault("kind", task.args().getOrDefault("target", "")))) {
+                case ORE -> new PlannedAction(GoapActionType.MINE_ORE, task.label(), "ore", this.resolveTarget(task.args()), 1.0D, 0);
+                case CROP -> PlannedAction.simple(GoapActionType.HARVEST_CROP, task.label());
+                case ANIMAL -> PlannedAction.simple(GoapActionType.OBSERVE_AND_REPORT, task.label());
+                case TREE -> new PlannedAction(GoapActionType.CHOP_TREE, task.label(), "wood", this.resolveTarget(task.args()), 1.0D, 0);
+                default -> new PlannedAction(GoapActionType.CHOP_TREE, task.label(), "wood", this.resolveTarget(task.args()), 1.0D, 0);
+            };
             case "chop_tree" -> new PlannedAction(GoapActionType.CHOP_TREE, task.label(), "wood", this.resolveTarget(task.args()), 1.0D, 0);
             case "mine_block" -> new PlannedAction(GoapActionType.MINE_ORE, task.label(), "ore", this.resolveTarget(task.args()), 1.0D, 0);
             case "collect_drops" -> PlannedAction.simple(GoapActionType.COLLECT_DROP, task.label());
@@ -386,6 +403,7 @@ final class AIPlayerBrain {
         }
         this.activeAction = null;
         this.activeActionKey = "";
+        this.resourceGatherSystem.cancel();
     }
 
     private BrainAction instantiateAction(ActionTask task) {
@@ -393,8 +411,7 @@ final class AIPlayerBrain {
             case "move_to" -> new MoveToAction(task);
             case "look_at" -> new LookAtAction(task);
             case "equip_tool" -> new EquipToolAction(task);
-            case "mine_block" -> new HarvestAction(task, false);
-            case "chop_tree" -> new ChopTreeAction(task);
+            case "mine_block", "chop_tree", "harvest_crop", "gather_resource", "execute_resource_plan" -> new GatherResourceAction(task);
             case "collect_drops" -> new CollectDropsAction(task);
             case "attack_target" -> new AttackTargetAction(task);
             case "place_block" -> new PlaceBlockAction(task);
@@ -404,7 +421,6 @@ final class AIPlayerBrain {
             case "consume_food" -> new ConsumeFoodAction(task);
             case "recover_self" -> new RecoverAction(task);
             case "observe" -> new ObserveAction(task);
-            case "harvest_crop" -> new CropHarvestAction(task);
             case "deliver_item" -> new DeliverItemAction(task);
             default -> new ObserveAction(task);
         };
@@ -721,6 +737,37 @@ final class AIPlayerBrain {
         public BrainActionResult tick() {
             String kind = this.task.args().getOrDefault("kind", this.task.args().getOrDefault("target", "wood")).toLowerCase(Locale.ROOT);
             return AIPlayerBrain.this.entity.runtimePrepareHarvestTool(!"ore".equals(kind)) ? BrainActionResult.SUCCESS : BrainActionResult.BLOCKED;
+        }
+    }
+
+    private final class GatherResourceAction extends BaseBrainAction {
+        private GatherResourceAction(ActionTask task) {
+            super(task);
+        }
+
+        @Override
+        public BrainActionResult tick() {
+            ResourceExecutionResult result = AIPlayerBrain.this.resourceGatherSystem.tick(this.task, AIPlayerBrain.this.worldModel, AIPlayerBrain.this.sharedMemory);
+            return switch (result.status()) {
+                case RUNNING -> BrainActionResult.RUNNING;
+                case SUCCESS -> BrainActionResult.SUCCESS;
+                case FAILURE -> BrainActionResult.FAILURE;
+                case BLOCKED -> BrainActionResult.BLOCKED;
+            };
+        }
+
+        @Override
+        public void cancel() {
+            AIPlayerBrain.this.resourceGatherSystem.cancel();
+        }
+
+        @Override
+        public String label() {
+            ResourcePlan plan = AIPlayerBrain.this.resourceGatherSystem.currentPlan();
+            if (plan == null) {
+                return super.label();
+            }
+            return super.label() + " | " + plan.step() + " | " + plan.status();
         }
     }
 
@@ -1088,18 +1135,10 @@ final class AIPlayerBrain {
                         BehaviorNodeSpec.action("观察环境", "observe", Map.of())));
                 case GUARD_OWNER -> combatPlan(entity, world, shared).subtree();
                 case RECOVER_SELF -> emergencyPlan(entity, world, shared).subtree();
-                case COLLECT_WOOD -> BehaviorNodeSpec.sequence("GatherWood", List.of(
-                        BehaviorNodeSpec.action("准备斧头", "equip_tool", Map.of("kind", "wood")),
-                        BehaviorNodeSpec.action("贴近树木", "move_to", Map.of("target", "wood", "reachDistance", "6", "speed", "1.02")),
-                        BehaviorNodeSpec.action("扫描并砍树", "chop_tree", Map.of("target", "wood")),
-                        BehaviorNodeSpec.action("收集掉落物", "collect_drops", Map.of())));
-                case COLLECT_ORE -> BehaviorNodeSpec.sequence("MineOre", List.of(
-                        BehaviorNodeSpec.action("准备镐子", "equip_tool", Map.of("kind", "ore")),
-                        BehaviorNodeSpec.action("靠近矿点", "move_to", Map.of("target", "ore", "reachDistance", "6", "speed", "1.0")),
-                        BehaviorNodeSpec.action("采掘矿石", "mine_block", Map.of("target", "ore", "kind", "ore")),
-                        BehaviorNodeSpec.action("收集掉落物", "collect_drops", Map.of())));
+                case COLLECT_WOOD -> ResourceActionCompiler.compileGather(ResourceKind.TREE, 8, "GatherWood");
+                case COLLECT_ORE -> ResourceActionCompiler.compileGather(ResourceKind.ORE, 4, "MineOre");
                 case COLLECT_FOOD -> BehaviorNodeSpec.sequence("CollectFood", List.of(
-                        BehaviorNodeSpec.action("寻找并收割作物", "harvest_crop", Map.of()),
+                        ResourceActionCompiler.compileGather(ResourceKind.CROP, 1, "HarvestCrops"),
                         BehaviorNodeSpec.action("尝试补充食物", "consume_food", Map.of()),
                         BehaviorNodeSpec.action("观察环境", "observe", Map.of())));
                 case BUILD_SHELTER -> new BehaviorNodeSpec(null, "repeat_until", "BuildShelter", "shelter_ready", null, List.of(

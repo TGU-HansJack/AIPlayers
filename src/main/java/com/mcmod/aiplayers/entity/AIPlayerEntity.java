@@ -1567,6 +1567,17 @@ public class AIPlayerEntity extends PathfinderMob {
             equipment.add(new WorldModelSnapshot.EquipmentFact(slot.getName(), BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(), stack.getHoverName().getString()));
         }
 
+        List<WorldModelSnapshot.SpatialFact> treeTargets = new ArrayList<>();
+        for (TreeTarget target : new TreeScanner().scan(this, null).stream().limit(12).toList()) {
+            treeTargets.add(new WorldModelSnapshot.SpatialFact("tree_target", "tree", target.base(), origin.distSqr(target.base())));
+        }
+        List<WorldModelSnapshot.SpatialFact> oreVeins = new ArrayList<>();
+        List<BlockPos> scannedOreNodes = new OreScanner().scanOreNodes(this, null);
+        for (ResourceCluster vein : new VeinDetector().detectVeins(this, scannedOreNodes).stream().limit(12).toList()) {
+            oreVeins.add(new WorldModelSnapshot.SpatialFact("ore_vein", "ore_vein", vein.seed(), origin.distSqr(vein.seed())));
+        }
+        List<WorldModelSnapshot.SpatialFact> failedResources = List.of();
+
         WorldModelSnapshot.NavigationState navigation = movementController == null
                 ? WorldModelSnapshot.NavigationState.idle()
                 : new WorldModelSnapshot.NavigationState(movementController.getActiveTargetPos(), movementController.isPathActive(), movementController.isRecovering(), movementController.getPathStatus());
@@ -1574,6 +1585,9 @@ public class AIPlayerEntity extends PathfinderMob {
                 this.stuckNavigationTicks >= NAVIGATION_STUCK_THRESHOLD / 2 || (movementController != null && movementController.isRecovering()),
                 this.stuckNavigationTicks,
                 movementController != null && movementController.isRecovering());
+        String gatherProgress = this.agentRuntime == null ? "" : this.agentRuntime.currentActionLabel();
+        PathPlan pathPlan = movementController == null ? null : movementController.getCurrentPlan();
+        String pathPlanSummary = pathPlan == null ? "" : pathPlan.status() + " steps=" + pathPlan.steps().size();
 
         return new WorldModelSnapshot(
                 this.level().getGameTime(),
@@ -1588,6 +1602,9 @@ public class AIPlayerEntity extends PathfinderMob {
                 navigation,
                 stuckState,
                 interactables.stream().sorted(Comparator.comparingDouble(WorldModelSnapshot.SpatialFact::distanceSqr)).toList(),
+                treeTargets.stream().sorted(Comparator.comparingDouble(WorldModelSnapshot.SpatialFact::distanceSqr)).toList(),
+                oreVeins.stream().sorted(Comparator.comparingDouble(WorldModelSnapshot.SpatialFact::distanceSqr)).toList(),
+                failedResources,
                 owner == null ? null : owner.blockPosition(),
                 this.observedHostile == null ? null : this.observedHostile.blockPosition(),
                 this.observedDrop == null ? null : this.observedDrop.blockPosition(),
@@ -1604,6 +1621,8 @@ public class AIPlayerEntity extends PathfinderMob {
                 this.shelterAnchor != null && this.findNextShelterPlacement() == null,
                 this.countAvailableBuildingUnits(),
                 Math.max(0, BACKPACK_SIZE - this.getUsedBackpackSlots()),
+                gatherProgress,
+                pathPlanSummary,
                 this.getObservationSummary(),
                 this.getCognitiveSummary());
     }

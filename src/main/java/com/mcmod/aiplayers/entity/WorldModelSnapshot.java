@@ -16,6 +16,9 @@ public record WorldModelSnapshot(
         NavigationState navigation,
         StuckState stuckState,
         List<SpatialFact> currentInteractables,
+        List<SpatialFact> treeTargets,
+        List<SpatialFact> oreVeins,
+        List<SpatialFact> failedResources,
         BlockPos ownerPos,
         BlockPos hostilePos,
         BlockPos droppedItemPos,
@@ -32,6 +35,8 @@ public record WorldModelSnapshot(
         boolean shelterReady,
         int buildingUnits,
         int freeBackpackSlots,
+        String gatherProgress,
+        String pathPlanSummary,
         String observation,
         String cognition) {
     public WorldModelSnapshot {
@@ -46,12 +51,17 @@ public record WorldModelSnapshot(
         navigation = navigation == null ? NavigationState.idle() : navigation;
         stuckState = stuckState == null ? StuckState.clear() : stuckState;
         currentInteractables = currentInteractables == null ? List.of() : List.copyOf(currentInteractables);
+        treeTargets = treeTargets == null ? List.of() : List.copyOf(treeTargets);
+        oreVeins = oreVeins == null ? List.of() : List.copyOf(oreVeins);
+        failedResources = failedResources == null ? List.of() : List.copyOf(failedResources);
+        gatherProgress = gatherProgress == null ? "" : gatherProgress;
+        pathPlanSummary = pathPlanSummary == null ? "" : pathPlanSummary;
         observation = observation == null ? "" : observation;
         cognition = cognition == null ? "" : cognition;
     }
 
     public static WorldModelSnapshot empty() {
-        return new WorldModelSnapshot(0L, AIPlayerMode.IDLE, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), NavigationState.idle(), StuckState.clear(), List.of(), null, null, null, false, false, false, false, false, false, false, false, false, false, false, 0, 0, "", "");
+        return new WorldModelSnapshot(0L, AIPlayerMode.IDLE, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), NavigationState.idle(), StuckState.clear(), List.of(), List.of(), List.of(), List.of(), null, null, null, false, false, false, false, false, false, false, false, false, false, false, 0, 0, "", "", "", "");
     }
 
     public SpatialFact nearestResource(String kind) {
@@ -85,6 +95,8 @@ public record WorldModelSnapshot(
                 + " toolsLow=" + this.lowTools
                 + " night=" + this.night
                 + " resources=" + this.resources.size()
+                + " trees=" + this.treeTargets.size()
+                + " veins=" + this.oreVeins.size()
                 + " structures=" + this.structures.size();
     }
 

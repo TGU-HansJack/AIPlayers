@@ -34,8 +34,10 @@ final class PathManager {
             SPIN_PROGRESS_THRESHOLD_SQR,
             SPIN_YAW_DELTA_THRESHOLD,
             SPIN_TRIGGER_TICKS);
+    private final AntiStuckSystem antiStuckSystem = new AntiStuckSystem(this.stuckDetector);
 
     private List<PathNode> activePath = List.of();
+    private PathPlan currentPlan = new PathPlan(null, List.of(), "idle");
     private BlockPos targetPos;
     private int pathIndex;
     private double speedModifier = 1.0D;
@@ -234,6 +236,10 @@ final class PathManager {
         return this.pathState.name() + "|" + this.pathStatus;
     }
 
+    PathPlan getCurrentPlan() {
+        return this.currentPlan;
+    }
+
     BlockPos getActiveTargetPos() {
         return this.targetPos;
     }
@@ -244,6 +250,8 @@ final class PathManager {
         this.activePathStartTick = gameTime;
         this.pathState = this.activePath.isEmpty() ? PathState.IDLE : PathState.MOVING;
         this.stuckDetector.reset(this.entity.position(), this.entity.getYRot(), gameTime);
+        this.antiStuckSystem.reset(this.entity.position(), this.entity.getYRot(), gameTime);
+        this.currentPlan = buildPlan(this.targetPos, this.activePath, this.pathStatus);
     }
 
     private boolean activePathTimedOut(long gameTime) {
@@ -270,12 +278,14 @@ final class PathManager {
         this.lastRecoveryJumpTick = 0L;
         this.lastDiggableAttemptTick = 0L;
         this.stuckDetector.clear();
+        this.antiStuckSystem.clear();
         this.entity.runtimeClearWasdOverride();
         this.entity.setZza(0.0F);
         this.entity.setXxa(0.0F);
         this.entity.setSpeed(0.0F);
         this.entity.setSprinting(false);
         this.pathStatus = "已到达";
+        this.currentPlan = new PathPlan(null, List.of(), this.pathStatus);
     }
 
     private Vec3 chooseWaypoint() {
@@ -335,6 +345,8 @@ final class PathManager {
 
     private void detectStuckAndRecover(Vec3 waypoint, long gameTime) {
         StuckDetector.SampleResult sample = this.stuckDetector.sample(this.entity.position(), this.entity.getYRot(), gameTime);
+        PathNode currentNode = this.pathIndex >= 0 && this.pathIndex < this.activePath.size() ? this.activePath.get(this.pathIndex) : null;
+        AntiStuckSystem.StuckSummary stuckSummary = this.antiStuckSystem.updateFromSample(sample, currentNode, false, false);
         if (!sample.checked()) {
             return;
         }
@@ -344,11 +356,11 @@ final class PathManager {
                 return;
             }
         }
-        if (sample.stuckTicks() < LOCAL_RECOVERY_TICKS) {
+        if (sample.stuckTicks() < LOCAL_RECOVERY_TICKS && !stuckSummary.recoverNeeded()) {
             return;
         }
 
-        this.pathStatus = "局部避障中";
+        this.pathStatus = "局部避障中|stuck=" + stuckSummary.stuckTicks() + "|nodeLoop=" + stuckSummary.nodeSwitchLoops();
         this.pathState = PathState.STUCK;
         if (sample.stuckTicks() >= LOCAL_RECOVERY_TICKS + STUCK_CHECK_INTERVAL_TICKS
                 && this.tryDiggableAdvance(gameTime, "局部卡死，切换挖掘脱困")) {
@@ -380,7 +392,7 @@ final class PathManager {
             }
         }
 
-        if (sample.stuckTicks() >= REPLAN_TICKS && this.targetPos != null) {
+        if ((sample.stuckTicks() >= REPLAN_TICKS || stuckSummary.severe()) && this.targetPos != null) {
             if (!this.pathCooldown.canAttemptSevereReplan(gameTime)) {
                 this.pathStatus = "等待重算退避窗口";
                 return;
@@ -544,6 +556,53 @@ final class PathManager {
             return false;
         }
         return Math.abs(waypoint.y - this.entity.getY()) <= maxYAbs;
+    }
+
+    private PathPlan buildPlan(BlockPos target, List<PathNode> nodes, String status) {
+        if (nodes == null || nodes.isEmpty()) {
+            return new PathPlan(target, List.of(), status);
+        }
+        List<PathStep> steps = new java.util.ArrayList<>(nodes.size());
+        PathNode previous = null;
+        for (PathNode node : nodes) {
+            if (node == null || node.position() == null) {
+                continue;
+            }
+            steps.add(new PathStep(node.position(), resolvePrimitive(previous, node), node.actionPos(), node.jumpRequired()));
+            previous = node;
+        }
+        return new PathPlan(target, steps, status);
+    }
+
+    private PathPrimitive resolvePrimitive(PathNode previous, PathNode current) {
+        if (current == null) {
+            return PathPrimitive.WALK;
+        }
+        if (current.action() == PathNodeAction.BREAK_BLOCK) {
+            return PathPrimitive.BREAK;
+        }
+        if (current.action() == PathNodeAction.PLACE_SUPPORT) {
+            return PathPrimitive.PLACE;
+        }
+        if (current.action() == PathNodeAction.JUMP_ASCEND || current.jumpRequired()) {
+            return PathPrimitive.JUMP;
+        }
+        if (previous == null || previous.position() == null || current.position() == null) {
+            return PathPrimitive.WALK;
+        }
+        double dx = current.position().x - previous.position().x;
+        double dy = current.position().y - previous.position().y;
+        double dz = current.position().z - previous.position().z;
+        if (Math.abs(dx) > 0.2D && Math.abs(dz) > 0.2D) {
+            return PathPrimitive.DIAGONAL;
+        }
+        if (dy > 0.2D) {
+            return PathPrimitive.ASCEND;
+        }
+        if (dy < -0.2D) {
+            return PathPrimitive.DESCEND;
+        }
+        return PathPrimitive.WALK;
     }
 
     private enum PathState {
