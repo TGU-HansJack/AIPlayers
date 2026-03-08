@@ -407,10 +407,17 @@ final class PathManager {
             return true;
         }
         BlockPos actionPos = node.actionPos();
-        boolean nearAction = this.entity.runtimeIsWithin(actionPos, 6.25D);
+        double actionDistanceSqr = node.action() == PathNodeAction.BREAK_BLOCK ? 20.25D : 16.0D;
+        boolean nearAction = this.entity.runtimeIsWithin(actionPos, actionDistanceSqr);
         if (!nearAction) {
             applyMoveToward(Vec3.atCenterOf(actionPos), 0.92D, node.jumpRequired(), gameTime);
             this.pathStatus = "接近路径动作点";
+            return false;
+        }
+
+        if (node.action() == PathNodeAction.BREAK_BLOCK && !this.entity.runtimeCanHarvestFromHere(actionPos)) {
+            applyMoveToward(Vec3.atCenterOf(actionPos), 0.85D, true, gameTime);
+            this.pathStatus = "清障点进入开挖距离";
             return false;
         }
 

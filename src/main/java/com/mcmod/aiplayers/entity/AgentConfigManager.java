@@ -70,20 +70,22 @@ public final class AgentConfigManager {
 
         private static Config createDefault() {
             Config config = new Config();
-            config.worldScanIntervalTicks = 100;
+            config.worldScanIntervalTicks = 40;
             config.plannerIntervalTicks = 20;
             config.executorIntervalTicks = 10;
             config.combatIntervalTicks = 5;
             config.telemetryIntervalTicks = 20;
             config.pathCacheTtlSeconds = 10;
-            config.resourceCacheTtlSeconds = 5;
+            config.resourceCacheTtlSeconds = 3;
             config.movementProfile = "player_like";
             return config;
         }
 
         private Config normalize() {
             if (this.worldScanIntervalTicks <= 0) {
-                this.worldScanIntervalTicks = 100;
+                this.worldScanIntervalTicks = 40;
+            } else if (this.worldScanIntervalTicks == 100) {
+                this.worldScanIntervalTicks = 40;
             }
             if (this.plannerIntervalTicks <= 0) {
                 this.plannerIntervalTicks = 20;
@@ -101,7 +103,7 @@ public final class AgentConfigManager {
                 this.pathCacheTtlSeconds = 10;
             }
             if (this.resourceCacheTtlSeconds <= 0) {
-                this.resourceCacheTtlSeconds = 5;
+                this.resourceCacheTtlSeconds = 3;
             }
             if (this.movementProfile == null || this.movementProfile.isBlank()) {
                 this.movementProfile = "player_like";

@@ -22,6 +22,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
 public final class WorldScanner {
+    private static final int ACTIVE_CHUNK_RADIUS = 2;
     private static final Map<ChunkKey, ChunkCacheEntry> CACHE = new ConcurrentHashMap<>();
 
     private WorldScanner() {
@@ -80,10 +81,10 @@ public final class WorldScanner {
 
     private static Set<ChunkPos> collectActiveChunks(AIPlayerEntity entity) {
         Set<ChunkPos> result = new HashSet<>();
-        addChunksAround(result, entity.blockPosition(), 1);
+        addChunksAround(result, entity.blockPosition(), ACTIVE_CHUNK_RADIUS);
         Player owner = entity.getRuntimeOwnerPlayer();
         if (owner != null) {
-            addChunksAround(result, owner.blockPosition(), 1);
+            addChunksAround(result, owner.blockPosition(), ACTIVE_CHUNK_RADIUS);
         }
         return result;
     }
@@ -109,8 +110,8 @@ public final class WorldScanner {
 
     private static ChunkCacheEntry rescanChunk(ServerLevel level, ChunkPos chunkPos, int focusY, long gameTime) {
         EnumMap<ResourceType, List<BlockPos>> resources = new EnumMap<>(ResourceType.class);
-        int minY = Math.max(level.dimensionType().minY(), focusY - 16);
-        int maxY = Math.min(level.dimensionType().minY() + level.dimensionType().height() - 1, focusY + 24);
+        int minY = Math.max(level.dimensionType().minY(), focusY - 20);
+        int maxY = Math.min(level.dimensionType().minY() + level.dimensionType().height() - 1, focusY + 30);
         for (int x = chunkPos.getMinBlockX(); x <= chunkPos.getMaxBlockX(); x++) {
             for (int z = chunkPos.getMinBlockZ(); z <= chunkPos.getMaxBlockZ(); z++) {
                 for (int y = minY; y <= maxY; y++) {

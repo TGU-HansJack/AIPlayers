@@ -13,11 +13,11 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.Vec3;
 
 public final class AgentPathPlanner {
-    private static final int MAX_CANDIDATE_TARGETS = 24;
-    private static final int MAX_SMOOTH_LOOKAHEAD = 4;
-    private static final int SEARCH_NODE_LIMIT = 3200;
-    private static final int MAX_STEP_HEIGHT = 2;
-    private static final int MAX_DROP_HEIGHT = 3;
+    private static final int MAX_CANDIDATE_TARGETS = 40;
+    private static final int MAX_SMOOTH_LOOKAHEAD = 6;
+    private static final int SEARCH_NODE_LIMIT = 12000;
+    private static final int MAX_STEP_HEIGHT = 3;
+    private static final int MAX_DROP_HEIGHT = 4;
 
     private AgentPathPlanner() {
     }
@@ -68,12 +68,13 @@ public final class AgentPathPlanner {
             }
         }
         for (Direction direction : Direction.Plane.HORIZONTAL) {
-            for (int step = 1; step <= 4; step++) {
+            for (int step = 1; step <= 6; step++) {
                 BlockPos lateral = target.relative(direction, step);
                 addCandidate(candidates, lateral);
                 addCandidate(candidates, lateral.above());
                 addCandidate(candidates, lateral.below());
                 addCandidate(candidates, lateral.below().below());
+                addCandidate(candidates, lateral.above().above());
             }
         }
         addCandidate(candidates, target.north().east());
@@ -85,13 +86,13 @@ public final class AgentPathPlanner {
         addCandidate(candidates, target.south(2).east(2));
         addCandidate(candidates, target.south(2).west(2));
 
-        for (int radius = 1; radius <= 3; radius++) {
+        for (int radius = 1; radius <= 5; radius++) {
             for (int x = -radius; x <= radius; x++) {
                 for (int z = -radius; z <= radius; z++) {
                     if (Math.abs(x) != radius && Math.abs(z) != radius) {
                         continue;
                     }
-                    for (int y = -2; y <= 2; y++) {
+                    for (int y = -3; y <= 3; y++) {
                         addCandidate(candidates, target.offset(x, y, z));
                     }
                 }
@@ -162,9 +163,18 @@ public final class AgentPathPlanner {
             return Double.MAX_VALUE;
         }
         Vec3 last = nodes.get(nodes.size() - 1).position();
-        double pathDistance = entity.position().distanceToSqr(nodes.get(0).position());
+        double pathDistance = entity.position().distanceTo(nodes.get(0).position());
+        int breakActions = 0;
+        int supportActions = 0;
         for (int i = 1; i < nodes.size(); i++) {
-            pathDistance += nodes.get(i - 1).position().distanceToSqr(nodes.get(i).position());
+            pathDistance += nodes.get(i - 1).position().distanceTo(nodes.get(i).position());
+        }
+        for (PathNode node : nodes) {
+            if (node.action() == PathNodeAction.BREAK_BLOCK) {
+                breakActions++;
+            } else if (node.action() == PathNodeAction.PLACE_SUPPORT) {
+                supportActions++;
+            }
         }
         double targetOffset = last.distanceToSqr(Vec3.atCenterOf(originalTarget));
         double landingOffset = actualTarget.distSqr(originalTarget);
@@ -173,7 +183,13 @@ public final class AgentPathPlanner {
         if (owner != null && (entity.getMode() == AIPlayerMode.FOLLOW || entity.getMode() == AIPlayerMode.GUARD || entity.getMode() == AIPlayerMode.IDLE)) {
             ownerBias = last.distanceToSqr(owner.position()) * 0.35D;
         }
-        return pathDistance + targetOffset * 2.0D + landingOffset * 3.0D + nodes.size() * 0.35D + ownerBias;
+        return pathDistance
+                + targetOffset * 2.1D
+                + landingOffset * 3.2D
+                + nodes.size() * 0.25D
+                + breakActions * 0.45D
+                + supportActions * 0.62D
+                + ownerBias;
     }
 
     private static List<PathNode> smooth(AIPlayerEntity entity, List<PathNode> nodes) {
@@ -211,18 +227,25 @@ public final class AgentPathPlanner {
     private static List<PathStep> neighbors(AIPlayerEntity entity, BlockPos from, CustomNodeEvaluator evaluator) {
         List<PathStep> steps = new ArrayList<>();
         boolean fromWater = evaluator.isWaterNode(from);
-        for (Direction direction : Direction.Plane.HORIZONTAL) {
-            BlockPos base = from.relative(direction);
+        int[][] offsets = new int[][]{
+                {1, 0}, {-1, 0}, {0, 1}, {0, -1},
+                {1, 1}, {1, -1}, {-1, 1}, {-1, -1}
+        };
+        for (int[] offset : offsets) {
+            int dx = offset[0];
+            int dz = offset[1];
+            boolean diagonal = Math.abs(dx) + Math.abs(dz) == 2;
+            double diagonalPenalty = diagonal ? 0.18D : 0.0D;
+            BlockPos base = from.offset(dx, 0, dz);
 
-            BlockPos same = base;
-            if (evaluator.canStandAt(same, true) && !evaluator.isLavaNode(same)) {
-                steps.add(new PathStep(same, evaluator.movementPenalty(same, false, PathNodeAction.NONE), PathNodeAction.NONE, null, false));
+            if (evaluator.canStandAt(base, true) && !evaluator.isLavaNode(base)) {
+                steps.add(new PathStep(base, evaluator.movementPenalty(base, false, PathNodeAction.NONE) + diagonalPenalty, PathNodeAction.NONE, null, false));
             }
 
             for (int up = 1; up <= MAX_STEP_HEIGHT; up++) {
                 BlockPos upPos = base.above(up);
                 if (evaluator.canStandAt(upPos, true) && !evaluator.isLavaNode(upPos)) {
-                    steps.add(new PathStep(upPos, evaluator.movementPenalty(upPos, true, PathNodeAction.JUMP_ASCEND), PathNodeAction.JUMP_ASCEND, null, true));
+                    steps.add(new PathStep(upPos, evaluator.movementPenalty(upPos, true, PathNodeAction.JUMP_ASCEND) + diagonalPenalty + 0.08D * up, PathNodeAction.JUMP_ASCEND, null, true));
                     break;
                 }
             }
@@ -230,43 +253,51 @@ public final class AgentPathPlanner {
             for (int down = 1; down <= MAX_DROP_HEIGHT; down++) {
                 BlockPos downPos = base.below(down);
                 if (evaluator.canStandAt(downPos, true) && !evaluator.isLavaNode(downPos)) {
-                    steps.add(new PathStep(downPos, evaluator.movementPenalty(downPos, false, PathNodeAction.NONE) + 0.2D * down, PathNodeAction.NONE, null, false));
+                    steps.add(new PathStep(downPos, evaluator.movementPenalty(downPos, false, PathNodeAction.NONE) + diagonalPenalty + 0.2D * down, PathNodeAction.NONE, null, false));
                     break;
                 }
             }
 
             if (fromWater && evaluator.isWaterNode(base) && !evaluator.isLavaNode(base)) {
-                steps.add(new PathStep(base, evaluator.movementPenalty(base, false, PathNodeAction.NONE), PathNodeAction.NONE, null, true));
+                steps.add(new PathStep(base, evaluator.movementPenalty(base, false, PathNodeAction.NONE) + diagonalPenalty, PathNodeAction.NONE, null, true));
             }
 
             BlockPos feetBlock = base;
             BlockPos headBlock = base.above();
-            if (evaluator.canBreakForPath(feetBlock) || evaluator.canBreakForPath(headBlock)) {
-                BlockPos clearTarget = evaluator.canBreakForPath(feetBlock) ? feetBlock : headBlock;
-                if (evaluator.canStandAt(base, true) || evaluator.isWaterNode(base) || evaluator.canOccupyAfterBreak(base, clearTarget)) {
-                    PathNodeAction action = PathNodeAction.BREAK_BLOCK;
-                    double penalty = evaluator.movementPenalty(base, false, action) + evaluator.breakPenalty(clearTarget);
-                    if (evaluator.isSoftBreakable(clearTarget)) {
-                        penalty = Math.max(0.85D, penalty - 0.25D);
-                    }
-                    steps.add(new PathStep(base, penalty, action, clearTarget, false));
+            for (BlockPos clearTarget : List.of(feetBlock, headBlock)) {
+                if (!evaluator.canBreakForPath(clearTarget)) {
+                    continue;
                 }
+                if (!evaluator.canStandAt(base, true) && !evaluator.isWaterNode(base) && !evaluator.canOccupyAfterBreak(base, clearTarget)) {
+                    continue;
+                }
+                PathNodeAction action = PathNodeAction.BREAK_BLOCK;
+                double penalty = evaluator.movementPenalty(base, false, action) + evaluator.breakPenalty(clearTarget) + diagonalPenalty;
+                if (evaluator.isSoftBreakable(clearTarget)) {
+                    penalty = Math.max(0.82D, penalty - 0.3D);
+                }
+                steps.add(new PathStep(base, penalty, action, clearTarget, false));
             }
 
             BlockPos supportPos = base.below();
             if (evaluator.canPlaceSupportAt(supportPos) && evaluator.canStandAt(base, true)) {
                 PathNodeAction action = PathNodeAction.PLACE_SUPPORT;
-                steps.add(new PathStep(base, evaluator.movementPenalty(base, true, action), action, supportPos, true));
+                steps.add(new PathStep(base, evaluator.movementPenalty(base, true, action) + diagonalPenalty, action, supportPos, true));
+            }
+
+            if (evaluator.canPlaceSupportAt(base) && evaluator.canStandAt(base.above(), true) && !evaluator.isLavaNode(base.above())) {
+                PathNodeAction action = PathNodeAction.PLACE_SUPPORT;
+                steps.add(new PathStep(base.above(), evaluator.movementPenalty(base.above(), true, action) + diagonalPenalty + 0.55D, action, base, true));
             }
 
             if (evaluator.isWaterNode(base) && !evaluator.isLavaNode(base)) {
                 BlockPos swimUp = base.above();
                 if (evaluator.canStandAt(swimUp, true) && !evaluator.isLavaNode(swimUp)) {
-                    steps.add(new PathStep(swimUp, evaluator.movementPenalty(swimUp, true, PathNodeAction.NONE) + 0.06D, PathNodeAction.NONE, null, true));
+                    steps.add(new PathStep(swimUp, evaluator.movementPenalty(swimUp, true, PathNodeAction.NONE) + 0.06D + diagonalPenalty, PathNodeAction.NONE, null, true));
                 }
                 BlockPos swimDown = base.below();
                 if (evaluator.canStandAt(swimDown, true) && !evaluator.isLavaNode(swimDown)) {
-                    steps.add(new PathStep(swimDown, evaluator.movementPenalty(swimDown, false, PathNodeAction.NONE) + 0.08D, PathNodeAction.NONE, null, false));
+                    steps.add(new PathStep(swimDown, evaluator.movementPenalty(swimDown, false, PathNodeAction.NONE) + 0.08D + diagonalPenalty, PathNodeAction.NONE, null, false));
                 }
             }
         }
@@ -274,9 +305,12 @@ public final class AgentPathPlanner {
     }
 
     private static double heuristic(BlockPos from, BlockPos to) {
-        return Math.abs(from.getX() - to.getX())
-                + Math.abs(from.getY() - to.getY()) * 1.35D
-                + Math.abs(from.getZ() - to.getZ());
+        int dx = Math.abs(from.getX() - to.getX());
+        int dz = Math.abs(from.getZ() - to.getZ());
+        int dy = Math.abs(from.getY() - to.getY());
+        int diagonal = Math.min(dx, dz);
+        int straight = Math.max(dx, dz) - diagonal;
+        return diagonal * 1.4142D + straight + dy * 1.45D;
     }
 
     private static boolean hasReached(BlockPos pos, BlockPos target) {

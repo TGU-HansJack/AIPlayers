@@ -1,5 +1,6 @@
 package com.mcmod.aiplayers.entity;
 
+import com.mcmod.aiplayers.AIPlayersMod;
 import com.mcmod.aiplayers.ai.AIServiceManager;
 import com.mcmod.aiplayers.ai.AIServiceResponse;
 import com.mcmod.aiplayers.ai.AITaskPlanResponse;
@@ -78,11 +79,17 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CropBlock;
+import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.FenceGateBlock;
+import net.minecraft.world.level.block.LeavesBlock;
 import net.minecraft.world.level.block.SoundType;
+import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.pathfinder.PathType;
+import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -109,23 +116,23 @@ public class AIPlayerEntity extends PathfinderMob {
     private static final String DEFAULT_BLUEPRINT_ID = "shelter";
     private static final Pattern NUMBER_PATTERN = Pattern.compile("(\\d+)");
     private static final int BACKPACK_SIZE = 36;
-    private static final int SCAN_RADIUS = 12;
-    private static final int SCAN_VERTICAL_DOWN = 6;
-    private static final int SCAN_VERTICAL_UP = 10;
-    private static final int SCAN_INTERVAL = 20;
-    private static final int RESOURCE_SCAN_INTERVAL = 60;
-    private static final int UTILITY_SCAN_INTERVAL = 100;
-    private static final int CROP_SCAN_INTERVAL = 60;
+    private static final int SCAN_RADIUS = 22;
+    private static final int SCAN_VERTICAL_DOWN = 12;
+    private static final int SCAN_VERTICAL_UP = 18;
+    private static final int SCAN_INTERVAL = 8;
+    private static final int RESOURCE_SCAN_INTERVAL = 30;
+    private static final int UTILITY_SCAN_INTERVAL = 40;
+    private static final int CROP_SCAN_INTERVAL = 30;
     private static final int TELEMETRY_SYNC_INTERVAL = 10;
     private static final int MEMORY_LIMIT = 12;
     private static final int NAVIGATION_STUCK_THRESHOLD = 60;
     private static final double HARVEST_REACH = 4.5D;
     private static final double RECOVERY_REACH = 3.5D;
-    private static final int HARVEST_TASK_STALE_TICKS = 120;
-    private static final int HARVEST_TASK_LOCK_TICKS = 90;
+    private static final int HARVEST_TASK_STALE_TICKS = 200;
+    private static final int HARVEST_TASK_LOCK_TICKS = 150;
     private static final double FAST_FOLLOW_SPEED = 1.35D;
     private static final double NORMAL_FOLLOW_SPEED = 1.15D;
-    private static final double OWNER_TELEPORT_FOLLOW_DISTANCE_SQR = 12.0D * 12.0D;
+    private static final double OWNER_TELEPORT_FOLLOW_DISTANCE_SQR = 30.0D * 30.0D;
     private static final double FAST_FOLLOW_DISTANCE_SQR = 12.0D * 12.0D;
     private static final double TELEPORT_FOLLOW_DISTANCE_SQR = 32.0D * 32.0D;
     private static final int ALERT_COOLDOWN_TICKS = 120;
@@ -133,6 +140,7 @@ public class AIPlayerEntity extends PathfinderMob {
     private static final double LOCAL_BLOCKER_CHECK_DISTANCE = HARVEST_REACH + 1.75D;
     private static final double HUNT_SCAN_RANGE = 28.0D;
     private static final int AWARENESS_BROADCAST_INTERVAL = 20 * 12;
+    private static final int DEBUG_STATUS_BROADCAST_INTERVAL = 20 * 3;
 
     private final NonNullList<ItemStack> backpack = NonNullList.withSize(BACKPACK_SIZE, ItemStack.EMPTY);
     private final List<String> memory = new ArrayList<>();
@@ -196,6 +204,7 @@ public class AIPlayerEntity extends PathfinderMob {
     private int lastResourceScanTick;
     private int lastUtilityScanTick;
     private int lastCropScanTick;
+    private int lastDebugStatusTick;
     private int lastTelemetrySyncTick = -TELEMETRY_SYNC_INTERVAL;
     private float pendingWasdForward;
     private float pendingWasdStrafe;
@@ -211,6 +220,7 @@ public class AIPlayerEntity extends PathfinderMob {
     private int miningRequiredTicks;
     private int miningLastTick;
     private int miningLastStage = -1;
+    private int miningOutOfReachTicks;
     private String miningObservationPrefix = "";
     private HarvestTaskState harvestTaskState = HarvestTaskState.IDLE;
     private boolean harvestTaskWoodMode;
@@ -375,6 +385,8 @@ public class AIPlayerEntity extends PathfinderMob {
 
         this.tickNavigationState();
         this.tickEnvironmentAwareness();
+        this.tickAdaptiveScanning();
+        this.tickDebugStatusBroadcast();
 
         if (AITickScheduler.shouldSyncTelemetry(this.tickCount)) {
             this.syncClientTelemetry();
@@ -477,7 +489,7 @@ public class AIPlayerEntity extends PathfinderMob {
     }
 
     public Component getBackpackMenuTitle() {
-        return Component.literal(this.getAIName() + " 的背包");
+        return Component.translatable("container.crafting");
     }
 
     public String startAnimalHunt(ServerPlayer speaker, String targetId, String label) {
@@ -1005,6 +1017,99 @@ public class AIPlayerEntity extends PathfinderMob {
         this.requestAwarenessBroadcast(owner, fallbackMessage);
     }
 
+    private void tickAdaptiveScanning() {
+        if (this.tickCount - this.lastResourceScanTick >= RESOURCE_SCAN_INTERVAL) {
+            this.lastResourceScanTick = this.tickCount;
+            this.scanSurroundings();
+        }
+        if (this.tickCount - this.lastUtilityScanTick >= UTILITY_SCAN_INTERVAL) {
+            this.lastUtilityScanTick = this.tickCount;
+            this.refreshKnownUtilityPoints();
+        }
+        if (this.tickCount - this.lastCropScanTick >= CROP_SCAN_INTERVAL) {
+            this.lastCropScanTick = this.tickCount;
+            BlockPos crop = this.findNearestUtilityBlock(this::isCropBlock, SCAN_RADIUS, 4, 6);
+            if (crop != null && !crop.equals(this.rememberedCrop)) {
+                this.recordUtilityDiscovery("作物", this.rememberedCrop, crop);
+                this.rememberedCrop = crop;
+            }
+        }
+    }
+
+    private void refreshKnownUtilityPoints() {
+        BlockPos previousBed = this.rememberedBed;
+        if (!this.isRememberedUtilityBlockValid(this.rememberedBed, this::isBedBlock)) {
+            this.rememberedBed = this.findNearestUtilityBlock(this::isBedBlock, SCAN_RADIUS, 5, 8);
+            this.recordUtilityDiscovery("床位", previousBed, this.rememberedBed);
+        }
+
+        BlockPos previousChest = this.rememberedChest;
+        if (!this.isRememberedUtilityBlockValid(this.rememberedChest, this::isStorageBlock)) {
+            this.rememberedChest = this.findNearestUtilityBlock(this::isStorageBlock, SCAN_RADIUS, 5, 8);
+            this.recordUtilityDiscovery("储物点", previousChest, this.rememberedChest);
+        }
+
+        BlockPos previousCrafting = this.rememberedCraftingTable;
+        if (!this.isRememberedUtilityBlockValid(this.rememberedCraftingTable, this::isCraftingBlock)) {
+            this.rememberedCraftingTable = this.findNearestUtilityBlock(this::isCraftingBlock, SCAN_RADIUS, 5, 8);
+            this.recordUtilityDiscovery("工作台", previousCrafting, this.rememberedCraftingTable);
+        }
+
+        BlockPos previousFurnace = this.rememberedFurnace;
+        if (!this.isRememberedUtilityBlockValid(this.rememberedFurnace, this::isFurnaceBlock)) {
+            this.rememberedFurnace = this.findNearestUtilityBlock(this::isFurnaceBlock, SCAN_RADIUS, 5, 8);
+            this.recordUtilityDiscovery("熔炉", previousFurnace, this.rememberedFurnace);
+        }
+    }
+
+    private void tickDebugStatusBroadcast() {
+        if (this.tickCount - this.lastDebugStatusTick < DEBUG_STATUS_BROADCAST_INTERVAL) {
+            return;
+        }
+        this.lastDebugStatusTick = this.tickCount;
+        String observation = this.lastObservation == null ? "" : this.lastObservation;
+        if (observation.length() > 36) {
+            observation = observation.substring(0, 36) + "…";
+        }
+        String debugLine = "模式=" + this.safeModeDisplayName()
+                + " | 动作=" + this.agentRuntime.currentActionLabel()
+                + " | 目标=" + this.buildDebugTargetSummary()
+                + " | 路径=" + this.buildDebugPathSummary()
+                + " | 观察=" + observation;
+        AIPlayersMod.LOGGER.info("[AIPlayers][Debug][{}] {}", this.getAIName(), debugLine);
+        ServerPlayer owner = this.getOwnerPlayer();
+        if (owner != null && !owner.isRemoved() && !owner.isSpectator()) {
+            owner.sendSystemMessage(Component.literal("[AI-DBG][" + this.getAIName() + "] " + debugLine));
+        }
+    }
+
+    private String buildDebugTargetSummary() {
+        if (this.getTarget() != null && this.getTarget().isAlive()) {
+            return "战斗:" + this.getTarget().getName().getString() + "@" + this.formatPos(this.getTarget().blockPosition());
+        }
+        if (this.miningTarget != null && this.miningMode != MiningMode.NONE) {
+            return "采掘:" + this.formatPos(this.miningTarget) + "(" + this.miningMode.name() + ")";
+        }
+        if (this.harvestTaskTarget != null) {
+            return "采集:" + this.formatPos(this.harvestTaskTarget) + "(" + this.harvestTaskState.name() + ")";
+        }
+        if (this.activeNavigationTarget != null) {
+            return "移动:" + this.formatPos(this.activeNavigationTarget);
+        }
+        if (this.huntLastKnownPos != null && this.hasActiveHuntDirective()) {
+            return "狩猎:" + this.huntTargetLabel + "@" + this.formatPos(this.huntLastKnownPos);
+        }
+        return "无";
+    }
+
+    private String buildDebugPathSummary() {
+        String path = this.agentRuntime.pathStatus();
+        if (this.activeNavigationTarget == null) {
+            return path;
+        }
+        return path + "->" + this.formatPos(this.activeNavigationTarget) + "/卡住" + this.stuckNavigationTicks + "t";
+    }
+
     private String buildEnvironmentBroadcastFallback() {
         return "\u73af\u5883\u53d8\u5316\uff1a" + this.getEnvironmentSummary();
     }
@@ -1287,6 +1392,8 @@ public class AIPlayerEntity extends PathfinderMob {
         if (!this.hasActiveHuntDirective()) {
             this.tryCraftStoneTool(Items.STONE_AXE, "石斧");
             this.tryCraftStoneTool(Items.STONE_PICKAXE, "石镐");
+            this.tryCraftStoneTool(Items.STONE_SHOVEL, "石铲", 1);
+            this.tryCraftStoneTool(Items.STONE_HOE, "石锄", 2);
         }
         this.shareResourcesWithTeammates();
 
@@ -1314,8 +1421,11 @@ public class AIPlayerEntity extends PathfinderMob {
     }
 
     private boolean hasLowTools() {
-        return this.countBackpackItem(Items.STONE_AXE) + this.countBackpackItem(Items.IRON_AXE) + this.countBackpackItem(Items.DIAMOND_AXE) <= 0
-                || this.countBackpackItem(Items.STONE_PICKAXE) + this.countBackpackItem(Items.IRON_PICKAXE) + this.countBackpackItem(Items.DIAMOND_PICKAXE) <= 0;
+        boolean hasAxe = this.countBackpackItem(Items.STONE_AXE) + this.countBackpackItem(Items.IRON_AXE) + this.countBackpackItem(Items.DIAMOND_AXE) + this.countBackpackItem(Items.NETHERITE_AXE) > 0;
+        boolean hasPickaxe = this.countBackpackItem(Items.STONE_PICKAXE) + this.countBackpackItem(Items.IRON_PICKAXE) + this.countBackpackItem(Items.DIAMOND_PICKAXE) + this.countBackpackItem(Items.NETHERITE_PICKAXE) > 0;
+        boolean hasShovel = this.countBackpackItem(Items.STONE_SHOVEL) + this.countBackpackItem(Items.IRON_SHOVEL) + this.countBackpackItem(Items.DIAMOND_SHOVEL) + this.countBackpackItem(Items.NETHERITE_SHOVEL) > 0;
+        boolean hasHoe = this.countBackpackItem(Items.STONE_HOE) + this.countBackpackItem(Items.IRON_HOE) + this.countBackpackItem(Items.DIAMOND_HOE) + this.countBackpackItem(Items.NETHERITE_HOE) > 0;
+        return !hasAxe || !hasPickaxe || !hasShovel || !hasHoe;
     }
 
     private boolean isOwnerUnderThreat() {
@@ -1613,6 +1723,7 @@ public class AIPlayerEntity extends PathfinderMob {
     }
 
     private void performHarvestTask(boolean woodTask) {
+        this.tryPlaceTorchForSafety();
         if (this.observedHostile != null && this.distanceToSqr(this.observedHostile) <= 49.0D) {
             this.setTarget(this.observedHostile);
             this.setForcedLookTarget(this.observedHostile.getEyePosition(), 10);
@@ -1646,6 +1757,12 @@ public class AIPlayerEntity extends PathfinderMob {
         if (this.shouldJumpToward(target)) {
             this.performAction(AIPlayerAction.JUMP);
         }
+        if (!this.canHarvestFromHere(target)
+                && target.getY() > this.blockPosition().getY() + 2
+                && this.tryPillarUpToward(target, "已脚底垫块接近高处目标@")) {
+            this.reportTaskProgress(this.activeTaskName, "目标较高，已脚底垫块继续采集");
+            return;
+        }
 
         BlockPos obstacle = this.findHarvestObstacle(target, woodTask);
         if (obstacle != null && this.canHarvestFromHere(obstacle)) {
@@ -1673,6 +1790,18 @@ public class AIPlayerEntity extends PathfinderMob {
         BlockPos navigationGoal = approach != null ? approach : this.runtimeResolveMovementTarget(focusTarget);
 
         if (navigationGoal == null || !this.navigateToPosition(navigationGoal, 1.05D)) {
+            if (this.tryDiggableAdvance(target)) {
+                this.reportTaskProgress(this.activeTaskName, "路径受阻，已尝试破障开路");
+                return;
+            }
+            if (this.tryBuildClimbSupportToward(target, "已搭建攀爬台阶@")) {
+                this.reportTaskProgress(this.activeTaskName, "路径受阻，已尝试搭建台阶继续采集");
+                return;
+            }
+            if (this.tryPillarUpToward(target, "已脚底垫块抬升@")) {
+                this.reportTaskProgress(this.activeTaskName, "目标较高，已脚底垫块抬升");
+                return;
+            }
             this.lastObservation = "目标路径受阻，正在重新规划@" + this.formatPos(target);
             this.reportTaskFailure(this.activeTaskName, "采集目标路径受阻：" + this.formatPos(target));
             if (woodTask) {
@@ -1857,17 +1986,23 @@ public class AIPlayerEntity extends PathfinderMob {
         if (!(this.level() instanceof ServerLevel serverLevel)) {
             return false;
         }
-        if (this.tickCount % 40 != 0) {
-            return false;
-        }
         AIPlayerMode mode = this.safeMode();
         if (mode != AIPlayerMode.MINE && mode != AIPlayerMode.EXPLORE && mode != AIPlayerMode.SURVIVE && mode != AIPlayerMode.BUILD_SHELTER) {
             return false;
         }
+        boolean darkCave = this.isInDarkCave();
+        int interval = darkCave ? 20 : 40;
+        if (this.tickCount % interval != 0) {
+            return false;
+        }
+        if (darkCave) {
+            this.ensureTorchSupplyForDarkness();
+        }
         if (this.countBackpackItem(Items.TORCH) <= 0) {
             return false;
         }
-        if (serverLevel.getMaxLocalRawBrightness(this.blockPosition()) > 5) {
+        int brightness = serverLevel.getMaxLocalRawBrightness(this.blockPosition());
+        if (brightness > (darkCave ? 7 : 5)) {
             return false;
         }
 
@@ -1886,6 +2021,25 @@ public class AIPlayerEntity extends PathfinderMob {
         this.lastObservation = "已放置火把@" + this.formatPos(placePos);
         this.remember("照明", this.lastObservation);
         return true;
+    }
+
+    private void ensureTorchSupplyForDarkness() {
+        if (this.countBackpackItem(Items.TORCH) >= 8) {
+            return;
+        }
+        this.tryCraftTorchBundle();
+    }
+
+    private boolean isInDarkCave() {
+        if (!(this.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        BlockPos pos = this.blockPosition();
+        if (serverLevel.canSeeSky(pos)) {
+            return false;
+        }
+        int brightness = serverLevel.getMaxLocalRawBrightness(pos);
+        return brightness <= 7;
     }
 
     private BlockPos findTorchPlacement() {
@@ -2009,6 +2163,16 @@ public class AIPlayerEntity extends PathfinderMob {
             case "iron_pickaxe" -> this.findBestToolInBackpack(this::isPickaxeItem, Items.IRON_PICKAXE, 4);
             case "diamond_pickaxe" -> this.findBestToolInBackpack(this::isPickaxeItem, Items.DIAMOND_PICKAXE, 5);
             case "netherite_pickaxe" -> this.findBestToolInBackpack(this::isPickaxeItem, Items.NETHERITE_PICKAXE, 6);
+            case "shovel" -> this.findBestToolInBackpack(this::isShovelItem, Items.STONE_SHOVEL);
+            case "stone_shovel" -> this.findBestToolInBackpack(this::isShovelItem, Items.STONE_SHOVEL, 3);
+            case "iron_shovel" -> this.findBestToolInBackpack(this::isShovelItem, Items.IRON_SHOVEL, 4);
+            case "diamond_shovel" -> this.findBestToolInBackpack(this::isShovelItem, Items.DIAMOND_SHOVEL, 5);
+            case "netherite_shovel" -> this.findBestToolInBackpack(this::isShovelItem, Items.NETHERITE_SHOVEL, 6);
+            case "hoe" -> this.findBestToolInBackpack(this::isHoeItem, Items.STONE_HOE);
+            case "stone_hoe" -> this.findBestToolInBackpack(this::isHoeItem, Items.STONE_HOE, 3);
+            case "iron_hoe" -> this.findBestToolInBackpack(this::isHoeItem, Items.IRON_HOE, 4);
+            case "diamond_hoe" -> this.findBestToolInBackpack(this::isHoeItem, Items.DIAMOND_HOE, 5);
+            case "netherite_hoe" -> this.findBestToolInBackpack(this::isHoeItem, Items.NETHERITE_HOE, 6);
             case "melee" -> this.findBestCombatItem();
             default -> ItemStack.EMPTY;
         };
@@ -2027,6 +2191,13 @@ public class AIPlayerEntity extends PathfinderMob {
         if (mode == MiningMode.HARVEST_WOOD) {
             this.runtimePrepareHarvestTool(true);
             return;
+        }
+        if (mode == MiningMode.AUXILIARY && this.isShovelPreferredBlock(state)) {
+            ItemStack shovel = this.findBestToolInBackpack(this::isShovelItem, Items.STONE_SHOVEL);
+            if (!shovel.isEmpty()) {
+                this.setItemSlot(EquipmentSlot.MAINHAND, shovel.copy());
+                return;
+            }
         }
         if (mode == MiningMode.HARVEST_ORE || mode == MiningMode.AUXILIARY) {
             this.runtimePrepareHarvestTool(false);
@@ -2097,7 +2268,12 @@ public class AIPlayerEntity extends PathfinderMob {
     }
 
     private boolean isCombatOrToolItem(Item item) {
-        return this.isSwordItem(item) || this.isAxeItem(item) || this.isPickaxeItem(item) || this.isArmorItem(item);
+        return this.isSwordItem(item)
+                || this.isAxeItem(item)
+                || this.isPickaxeItem(item)
+                || this.isShovelItem(item)
+                || this.isHoeItem(item)
+                || this.isArmorItem(item);
     }
 
     private boolean isSwordItem(Item item) {
@@ -2110,6 +2286,14 @@ public class AIPlayerEntity extends PathfinderMob {
 
     private boolean isPickaxeItem(Item item) {
         return this.getItemPath(item).endsWith("_pickaxe");
+    }
+
+    private boolean isShovelItem(Item item) {
+        return this.getItemPath(item).endsWith("_shovel");
+    }
+
+    private boolean isHoeItem(Item item) {
+        return this.getItemPath(item).endsWith("_hoe");
     }
 
     private boolean isArmorItem(Item item) {
@@ -2549,6 +2733,10 @@ public class AIPlayerEntity extends PathfinderMob {
             this.reportTaskProgress(this.activeTaskName, "已清理路径障碍，继续脱困");
             return true;
         }
+        if (blocker != null && this.tryOpenToggleablePathBlock(blocker, "已开启脱困通道@")) {
+            this.reportTaskProgress(this.activeTaskName, "已开启门/活板门，继续脱困");
+            return true;
+        }
 
         if (blocker != null) {
             BlockPos obstacleApproach = this.findApproachPosition(blocker);
@@ -2571,7 +2759,22 @@ public class AIPlayerEntity extends PathfinderMob {
             }
         }
 
-        if (this.activeNavigationTarget != null && this.onGround() && this.jumpCooldown <= 0) {
+        boolean likelyStuck = this.horizontalCollision
+                || this.stuckNavigationTicks >= SCAN_INTERVAL * 2
+                || this.agentRuntime.movementController().isRecovering();
+        if (likelyStuck && this.activeNavigationTarget != null && this.onGround() && this.jumpCooldown <= 0) {
+            if (this.tryDiggableAdvance(this.activeNavigationTarget)) {
+                this.reportTaskProgress(this.activeTaskName, "已尝试挖掘前方障碍，继续脱困");
+                return true;
+            }
+            if (this.tryBuildClimbSupportToward(this.activeNavigationTarget, "已搭建脱困台阶@")) {
+                this.reportTaskProgress(this.activeTaskName, "已搭建脱困台阶，继续前进");
+                return true;
+            }
+            if (this.tryPillarUpToward(this.activeNavigationTarget, "已脚底垫块脱困@")) {
+                this.reportTaskProgress(this.activeTaskName, "已脚底垫块抬升，继续脱困");
+                return true;
+            }
             this.performAction(AIPlayerAction.JUMP);
             this.nudgeToward(Vec3.atCenterOf(this.activeNavigationTarget), 0.22D, 0.32D);
             this.lastObservation = "尝试跳跃脱困。";
@@ -2654,6 +2857,85 @@ public class AIPlayerEntity extends PathfinderMob {
             return delta.x >= 0.0D ? Direction.EAST : Direction.WEST;
         }
         return delta.z >= 0.0D ? Direction.SOUTH : Direction.NORTH;
+    }
+
+    private boolean tryBuildClimbSupportToward(BlockPos targetPos, String observationPrefix) {
+        if (targetPos == null || !(this.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        if (!serverLevel.getGameRules().get(GameRules.MOB_GRIEFING)) {
+            return false;
+        }
+        if (!this.runtimeHasPathSupportBlocks()) {
+            return false;
+        }
+        BlockPos self = this.blockPosition();
+        if (targetPos.getY() <= self.getY()) {
+            return false;
+        }
+        Direction direction = this.resolveDigDirection(targetPos);
+        List<BlockPos> candidates = List.of(
+                self.relative(direction),
+                self.relative(direction).above(),
+                self.relative(direction).above().relative(direction));
+        for (BlockPos candidate : candidates) {
+            if (!this.runtimeCanPlacePathSupport(candidate)) {
+                continue;
+            }
+            if (!this.runtimePlacePathSupport(candidate)) {
+                continue;
+            }
+            this.lastObservation = observationPrefix + this.formatPos(candidate);
+            if (this.onGround() && this.jumpCooldown <= 0) {
+                this.getJumpControl().jump();
+                this.jumpCooldown = 8;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private boolean tryPillarUpToward(BlockPos targetPos, String observationPrefix) {
+        if (targetPos == null || !(this.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        if (!serverLevel.getGameRules().get(GameRules.MOB_GRIEFING)) {
+            return false;
+        }
+        if (!this.onGround() || this.jumpCooldown > 0) {
+            return false;
+        }
+        BlockPos self = this.blockPosition();
+        if (targetPos.getY() <= self.getY() + 1) {
+            return false;
+        }
+        if (this.distanceToSqr(Vec3.atCenterOf(targetPos)) > 25.0D) {
+            return false;
+        }
+        if (!this.runtimeCanPlacePathSupport(self)) {
+            return false;
+        }
+        BlockPos nextStand = self.above();
+        BlockState feet = this.level().getBlockState(nextStand);
+        BlockState head = this.level().getBlockState(nextStand.above());
+        if (!feet.getCollisionShape(this.level(), nextStand).isEmpty()
+                || !head.getCollisionShape(this.level(), nextStand.above()).isEmpty()
+                || this.level().getFluidState(nextStand).is(FluidTags.LAVA)
+                || this.level().getFluidState(nextStand.above()).is(FluidTags.LAVA)) {
+            return false;
+        }
+        if (!this.runtimePlacePathSupport(self)) {
+            return false;
+        }
+        if (!this.canStandAt(nextStand, true)) {
+            return false;
+        }
+        this.teleportTo(this.getX(), nextStand.getY(), this.getZ());
+        this.getNavigation().stop();
+        this.resetNavigationState();
+        this.jumpCooldown = 6;
+        this.lastObservation = observationPrefix + this.formatPos(self);
+        return true;
     }
 
     private boolean tryNavigationRecovery(boolean severe) {
@@ -2765,6 +3047,34 @@ public class AIPlayerEntity extends PathfinderMob {
         return this.tryTeleportNearPlayer(owner, observationPrefix);
     }
 
+    private boolean tryTeleportToOwnerIfTooFar(String observationPrefix) {
+        ServerPlayer owner = this.getOwnerPlayer();
+        if (owner == null || owner.isRemoved() || owner.isSpectator()) {
+            return false;
+        }
+        if (this.distanceToSqr(owner) < OWNER_TELEPORT_FOLLOW_DISTANCE_SQR) {
+            return false;
+        }
+        if (this.tryTeleportNearOwnerLikeWolf(owner, observationPrefix)) {
+            this.reportTaskProgress(this.activeTaskName, "与主人距离过远，已执行瞬移跟随");
+            return true;
+        }
+        BlockPos fallback = this.findWalkablePositionNear(owner.blockPosition(), 8, 6, true);
+        if (fallback == null) {
+            fallback = this.findWalkablePositionNear(owner.blockPosition(), 12, 8, true);
+        }
+        if (fallback == null) {
+            fallback = owner.blockPosition();
+        }
+        this.teleportTo(fallback.getX() + 0.5D, fallback.getY(), fallback.getZ() + 0.5D);
+        this.getNavigation().stop();
+        this.resetNavigationState();
+        this.setForcedLookTarget(owner.getEyePosition(), 12);
+        this.lastObservation = observationPrefix + this.formatPos(fallback);
+        this.reportTaskProgress(this.activeTaskName, "与主人距离过远，已使用兜底瞬移");
+        return true;
+    }
+
     private boolean canTeleportNearOwner(BlockPos candidate, BlockPos ownerPos) {
         if (candidate == null) {
             return false;
@@ -2772,11 +3082,24 @@ public class AIPlayerEntity extends PathfinderMob {
         if (Math.abs(candidate.getX() - ownerPos.getX()) < 2 && Math.abs(candidate.getZ() - ownerPos.getZ()) < 2) {
             return false;
         }
-        if (!this.canStandAt(candidate)) {
+        if (!this.canTeleportToLikeWolf(candidate)) {
             return false;
         }
         BlockPos movement = candidate.subtract(this.blockPosition());
         return this.level().noCollision(this, this.getBoundingBox().move(movement));
+    }
+
+    private boolean canTeleportToLikeWolf(BlockPos pos) {
+        BlockPos.MutableBlockPos mutable = pos.mutable();
+        PathType pathType = WalkNodeEvaluator.getPathTypeStatic(this, mutable);
+        if (pathType != PathType.WALKABLE) {
+            return false;
+        }
+        BlockState below = this.level().getBlockState(pos.below());
+        if (below.getBlock() instanceof LeavesBlock) {
+            return false;
+        }
+        return this.canStandAt(pos);
     }
 
     private BlockPos findNearbyDryStandPosition(BlockPos center, int horizontalRadius, int verticalRadius) {
@@ -2817,7 +3140,7 @@ public class AIPlayerEntity extends PathfinderMob {
             return null;
         }
         BlockState state = this.level().getBlockState(blocker);
-        return this.isBreakableNavigationObstacle(state) ? blocker : null;
+        return (this.isBreakableNavigationObstacle(state) || this.isToggleablePathBlock(state)) ? blocker : null;
     }
 
     private BlockPos findHarvestObstacle(BlockPos target, boolean woodTask) {
@@ -2890,14 +3213,14 @@ public class AIPlayerEntity extends PathfinderMob {
             BlockPos bestPos = null;
             double bestScore = Double.MAX_VALUE;
             int expanded = 0;
-            while (!frontier.isEmpty() && expanded < 96) {
+            while (!frontier.isEmpty() && expanded < 192) {
                 BlockPos current = frontier.poll();
                 expanded++;
                 for (Direction direction : Direction.values()) {
                     BlockPos candidate = current.relative(direction);
-                    if (Math.abs(candidate.getX() - base.getX()) > 3
-                            || Math.abs(candidate.getY() - base.getY()) > 8
-                            || Math.abs(candidate.getZ() - base.getZ()) > 3) {
+                    if (Math.abs(candidate.getX() - base.getX()) > 4
+                            || Math.abs(candidate.getY() - base.getY()) > 16
+                            || Math.abs(candidate.getZ() - base.getZ()) > 4) {
                         continue;
                     }
                     if (!visited.add(candidate)) {
@@ -2917,10 +3240,10 @@ public class AIPlayerEntity extends PathfinderMob {
 
                     double score = base.distSqr(candidate) + this.distanceToSqr(Vec3.atCenterOf(candidate));
                     if (candidate.getY() > base.getY()) {
-                        score -= 0.8D * (candidate.getY() - base.getY());
+                        score -= 1.1D * (candidate.getY() - base.getY());
                     }
                     if (this.canHarvestFromHere(candidate)) {
-                        score -= 0.6D;
+                        score -= 1.2D;
                     }
                     if (score < bestScore) {
                         bestScore = score;
@@ -2973,6 +3296,36 @@ public class AIPlayerEntity extends PathfinderMob {
         return false;
     }
 
+    private boolean isToggleablePathBlock(BlockState state) {
+        if (state == null || state.isAir()) {
+            return false;
+        }
+        return state.getBlock() instanceof DoorBlock
+                || state.getBlock() instanceof TrapDoorBlock
+                || state.getBlock() instanceof FenceGateBlock;
+    }
+
+    private boolean tryOpenToggleablePathBlock(BlockPos pos, String observationPrefix) {
+        if (pos == null || !(this.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        BlockState state = serverLevel.getBlockState(pos);
+        if (!this.isToggleablePathBlock(state)) {
+            return false;
+        }
+        if (!state.hasProperty(BlockStateProperties.OPEN)) {
+            return false;
+        }
+        if (Boolean.TRUE.equals(state.getValue(BlockStateProperties.OPEN))) {
+            return true;
+        }
+        BlockState opened = state.setValue(BlockStateProperties.OPEN, true);
+        serverLevel.setBlock(pos, opened, 10);
+        WorldScanner.invalidateAt(serverLevel, pos);
+        this.lastObservation = observationPrefix + this.formatPos(pos);
+        return true;
+    }
+
     private boolean isBreakableNavigationObstacle(BlockState state) {
         return this.isBreakableMiningCover(state) || state.is(BlockTags.LEAVES);
     }
@@ -3003,6 +3356,19 @@ public class AIPlayerEntity extends PathfinderMob {
                 || state.is(Blocks.NETHERRACK);
     }
 
+    private boolean isShovelPreferredBlock(BlockState state) {
+        return state.is(Blocks.DIRT)
+                || state.is(Blocks.GRASS_BLOCK)
+                || state.is(Blocks.COARSE_DIRT)
+                || state.is(Blocks.ROOTED_DIRT)
+                || state.is(Blocks.GRAVEL)
+                || state.is(Blocks.SAND)
+                || state.is(Blocks.RED_SAND)
+                || state.is(Blocks.CLAY)
+                || state.is(Blocks.SNOW)
+                || state.is(Blocks.SNOW_BLOCK);
+    }
+
     private boolean breakAuxiliaryBlock(BlockPos pos, String observationPrefix) {
         return this.mineBlockTick(pos, MiningMode.AUXILIARY, observationPrefix);
     }
@@ -3026,17 +3392,39 @@ public class AIPlayerEntity extends PathfinderMob {
             return;
         }
         Vec3 center = Vec3.atCenterOf(pos);
-        if (this.distanceToSqr(center) > HARVEST_REACH * HARVEST_REACH || !this.canHarvestFromHere(pos)) {
+        boolean reachableNow = this.distanceToSqr(center) <= HARVEST_REACH * HARVEST_REACH && this.canHarvestFromHere(pos);
+        if (!reachableNow) {
+            this.miningOutOfReachTicks++;
+            if (this.miningOutOfReachTicks <= 12) {
+                this.setForcedLookTarget(center, 6);
+                if (this.tickCount % 6 == 0) {
+                    BlockPos approach = this.findApproachPosition(pos);
+                    if (approach != null) {
+                        this.navigateToPosition(approach, 1.08D);
+                    }
+                }
+                return;
+            }
+            BlockPos approach = this.findApproachPosition(pos);
+            if (approach != null) {
+                this.navigateToPosition(approach, 1.1D);
+                this.lastObservation = "采掘位点重定位@" + this.formatPos(approach);
+            }
             this.resetMiningState();
             return;
         }
+        this.miningOutOfReachTicks = 0;
         this.getNavigation().stop();
         this.runtimeClearWasdOverride();
         this.setZza(0.0F);
         this.setXxa(0.0F);
         this.setSpeed(0.0F);
         this.setSprinting(false);
-        this.facePosition(center);
+        if (this.tickCount % 8 == 0) {
+            this.facePosition(center);
+        } else {
+            this.setForcedLookTarget(center, 8);
+        }
 
         this.miningLastTick = this.tickCount;
         this.miningRequiredTicks = this.computeMiningRequiredTicks(state, pos);
@@ -3066,6 +3454,7 @@ public class AIPlayerEntity extends PathfinderMob {
         this.miningRequiredTicks = 0;
         this.miningLastTick = 0;
         this.miningLastStage = -1;
+        this.miningOutOfReachTicks = 0;
         this.miningObservationPrefix = "";
     }
 
@@ -3271,10 +3660,13 @@ public class AIPlayerEntity extends PathfinderMob {
             this.miningObservationPrefix = observationPrefix == null ? "" : observationPrefix;
             this.miningProgressTicks = 0;
             this.miningRequiredTicks = this.computeMiningRequiredTicks(state, pos);
+            this.miningOutOfReachTicks = 0;
             this.miningLastTick = this.tickCount;
             if (mode == MiningMode.HARVEST_WOOD || mode == MiningMode.HARVEST_ORE) {
                 this.touchHarvestTaskProgress();
             }
+            this.facePosition(center);
+            this.setForcedLookTarget(center, 10);
         }
         return false;
     }
@@ -3414,6 +3806,10 @@ public class AIPlayerEntity extends PathfinderMob {
     }
 
     private boolean tryCraftStoneTool(Item toolItem, String toolName) {
+        return this.tryCraftStoneTool(toolItem, toolName, 3);
+    }
+
+    private boolean tryCraftStoneTool(Item toolItem, String toolName, int stoneCost) {
         Identifier toolId = BuiltInRegistries.ITEM.getKey(toolItem);
         if (toolId != null && this.tryCraftByKnowledge(toolId.toString(), toolName, 1)) {
             return true;
@@ -3421,7 +3817,8 @@ public class AIPlayerEntity extends PathfinderMob {
         if (this.countBackpackItem(toolItem) > 0) {
             return false;
         }
-        if (this.countBackpackItem(Items.COBBLESTONE) < 3) {
+        int requiredStone = Math.max(1, stoneCost);
+        if (this.countBackpackItem(Items.COBBLESTONE) < requiredStone) {
             return false;
         }
         if (!this.ensurePlanksCount(2)) {
@@ -3430,12 +3827,12 @@ public class AIPlayerEntity extends PathfinderMob {
         if (this.countBackpackItem(Items.STICK) < 2) {
             this.consumeBackpackItem(Items.OAK_PLANKS, 2);
             this.storeInBackpack(new ItemStack(Items.STICK, 4));
-            this.remember("合成", "制作面包");
+            this.remember("合成", "制作木棍");
         }
         if (this.countBackpackItem(Items.STICK) < 2) {
             return false;
         }
-        this.consumeBackpackItem(Items.COBBLESTONE, 3);
+        this.consumeBackpackItem(Items.COBBLESTONE, requiredStone);
         this.consumeBackpackItem(Items.STICK, 2);
         this.storeInBackpack(new ItemStack(toolItem));
         this.remember("合成", "制作" + toolName);
@@ -3560,6 +3957,15 @@ public class AIPlayerEntity extends PathfinderMob {
             return this.harvestCrop(matureCrop);
         }
 
+        BlockPos tillableSoil = this.findTillableSoil();
+        if (tillableSoil != null && this.hasAnyCropSeed()) {
+            if (this.distanceToSqr(Vec3.atCenterOf(tillableSoil)) > 9.0D) {
+                BlockPos approach = this.findApproachPosition(tillableSoil);
+                return approach != null && this.navigateToPosition(approach, 1.0D);
+            }
+            return this.tillSoil(tillableSoil);
+        }
+
         BlockPos farmland = this.findPlantableFarmland();
         if (farmland != null && this.hasAnyCropSeed()) {
             if (this.distanceToSqr(Vec3.atCenterOf(farmland)) > 9.0D) {
@@ -3622,6 +4028,69 @@ public class AIPlayerEntity extends PathfinderMob {
             }
         }
         return best;
+    }
+
+    private BlockPos findTillableSoil() {
+        BlockPos center = this.blockPosition();
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (int x = -8; x <= 8; x++) {
+            for (int y = -2; y <= 2; y++) {
+                for (int z = -8; z <= 8; z++) {
+                    BlockPos pos = center.offset(x, y, z);
+                    if (!this.isTillableSoilState(this.level().getBlockState(pos))) {
+                        continue;
+                    }
+                    if (!this.level().getBlockState(pos.above()).isAir()) {
+                        continue;
+                    }
+                    double distance = this.distanceToSqr(Vec3.atCenterOf(pos));
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        best = pos.immutable();
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    private boolean isTillableSoilState(BlockState state) {
+        return state.is(Blocks.DIRT)
+                || state.is(Blocks.GRASS_BLOCK)
+                || state.is(Blocks.COARSE_DIRT)
+                || state.is(Blocks.ROOTED_DIRT);
+    }
+
+    private boolean tillSoil(BlockPos pos) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) {
+            return false;
+        }
+        if (!serverLevel.getGameRules().get(GameRules.MOB_GRIEFING)) {
+            return false;
+        }
+        BlockState state = serverLevel.getBlockState(pos);
+        if (!this.isTillableSoilState(state) || !serverLevel.getBlockState(pos.above()).isAir()) {
+            return false;
+        }
+        ItemStack hoe = this.findBestToolInBackpack(this::isHoeItem, Items.STONE_HOE);
+        if (hoe.isEmpty() && !this.tryCraftStoneTool(Items.STONE_HOE, "石锄", 2)) {
+            return false;
+        }
+        if (hoe.isEmpty()) {
+            hoe = this.findBestToolInBackpack(this::isHoeItem, Items.STONE_HOE);
+        }
+        if (!hoe.isEmpty()) {
+            this.setItemSlot(EquipmentSlot.MAINHAND, hoe.copy());
+        }
+        this.facePosition(Vec3.atCenterOf(pos));
+        this.swing(InteractionHand.MAIN_HAND);
+        serverLevel.setBlock(pos, Blocks.FARMLAND.defaultBlockState(), 3);
+        WorldScanner.invalidateAt(serverLevel, pos);
+        this.lastObservation = "已耕地@" + this.formatPos(pos);
+        this.remember("农场", this.lastObservation);
+        this.reportTaskProgress(this.activeTaskName, "已使用锄头耕地：" + this.formatPos(pos));
+        return true;
     }
 
     private boolean harvestCrop(BlockPos pos) {
@@ -3836,6 +4305,10 @@ public class AIPlayerEntity extends PathfinderMob {
         return state.is(Blocks.FURNACE) || state.is(Blocks.BLAST_FURNACE) || state.is(Blocks.SMOKER);
     }
 
+    private boolean isCropBlock(BlockState state) {
+        return state.getBlock() instanceof CropBlock;
+    }
+
     private boolean isValidHarvestTarget(BlockPos pos, boolean woodTask) {
         if (pos == null) {
             return false;
@@ -3955,7 +4428,7 @@ public class AIPlayerEntity extends PathfinderMob {
         double dz = center.z - eyes.z;
         double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
         double horizontal = Math.sqrt(dx * dx + dz * dz);
-        if (distance > HARVEST_REACH || horizontal > 3.4D || Math.abs(dy) > 3.2D) {
+        if (distance > HARVEST_REACH || horizontal > 4.5D || Math.abs(dy) > 4.6D) {
             return false;
         }
         BlockHitResult hitResult = this.level().clip(new ClipContext(eyes, center, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, this));
@@ -3988,14 +4461,18 @@ public class AIPlayerEntity extends PathfinderMob {
                 candidates.add(lateral);
                 candidates.add(lateral.above());
                 candidates.add(lateral.above().above());
+                candidates.add(lateral.above().above().above());
                 candidates.add(lateral.below());
                 candidates.add(lateral.below().below());
+                candidates.add(lateral.below().below().below());
             }
         }
         candidates.add(target.below());
         candidates.add(target.below().below());
+        candidates.add(target.below().below().below());
         candidates.add(target.above());
         candidates.add(target.above().above());
+        candidates.add(target.above().above().above());
         candidates.add(target.north().east());
         candidates.add(target.north().west());
         candidates.add(target.south().east());
@@ -4020,8 +4497,10 @@ public class AIPlayerEntity extends PathfinderMob {
                 candidates.add(lateral);
                 candidates.add(lateral.above());
                 candidates.add(lateral.above().above());
+                candidates.add(lateral.above().above().above());
                 candidates.add(lateral.below());
                 candidates.add(lateral.below().below());
+                candidates.add(lateral.below().below().below());
             }
         }
         candidates.add(target.north().east());
@@ -4639,6 +5118,8 @@ public class AIPlayerEntity extends PathfinderMob {
         }
         this.storeInBackpack(new ItemStack(Items.STONE_AXE));
         this.storeInBackpack(new ItemStack(Items.STONE_PICKAXE));
+        this.storeInBackpack(new ItemStack(Items.STONE_SHOVEL));
+        this.storeInBackpack(new ItemStack(Items.STONE_HOE));
         this.storeInBackpack(new ItemStack(Items.IRON_SWORD));
         this.storeInBackpack(new ItemStack(Items.BREAD, 8));
         this.applyModeEquipment();
@@ -5270,6 +5751,16 @@ public class AIPlayerEntity extends PathfinderMob {
         return this.attemptImmediateRecovery();
     }
 
+    boolean runtimeShouldAttemptImmediateRecovery() {
+        return this.isInWater()
+                || this.isUnderWater()
+                || this.isInLava()
+                || this.isOnFire()
+                || this.horizontalCollision
+                || this.stuckNavigationTicks >= SCAN_INTERVAL * 2
+                || this.agentRuntime.movementController().isRecovering();
+    }
+
     boolean runtimeIsMiningLocked() {
         return this.isMiningLocked();
     }
@@ -5318,10 +5809,17 @@ public class AIPlayerEntity extends PathfinderMob {
         if (state.isAir()) {
             return false;
         }
+        if (this.isToggleablePathBlock(state)) {
+            return true;
+        }
         return woodTask ? this.isBreakableHarvestObstacle(state, true) : this.isBreakableNavigationObstacle(state) || this.isBreakableHarvestObstacle(state, false);
     }
 
     boolean runtimeBreakPathBlock(BlockPos pos, boolean woodTask) {
+        if (this.tryOpenToggleablePathBlock(pos, "已开启通路方块@")) {
+            this.touchHarvestTaskProgress();
+            return true;
+        }
         boolean cleared = this.breakAuxiliaryBlock(pos, woodTask ? "已清理树叶@" : "已清理路径障碍@");
         if (cleared) {
             this.touchHarvestTaskProgress();
@@ -5427,7 +5925,10 @@ public class AIPlayerEntity extends PathfinderMob {
         if (this.hasActiveHuntDirective()) {
             return false;
         }
-        return this.tryCraftStoneTool(Items.STONE_AXE, "石斧") | this.tryCraftStoneTool(Items.STONE_PICKAXE, "石镐");
+        return this.tryCraftStoneTool(Items.STONE_AXE, "石斧")
+                | this.tryCraftStoneTool(Items.STONE_PICKAXE, "石镐")
+                | this.tryCraftStoneTool(Items.STONE_SHOVEL, "石铲", 1)
+                | this.tryCraftStoneTool(Items.STONE_HOE, "石锄", 2);
     }
 
     boolean runtimeHasLowTools() {
@@ -5478,10 +5979,16 @@ public class AIPlayerEntity extends PathfinderMob {
         if (state.isAir()) {
             return false;
         }
+        if (this.isToggleablePathBlock(state)) {
+            return true;
+        }
         return this.isBreakableNavigationObstacle(state) || this.isBreakableHarvestObstacle(state, true) || this.isSurfacePathBreakable(state);
     }
 
     boolean runtimeBreakPathNavigationBlock(BlockPos pos) {
+        if (this.tryOpenToggleablePathBlock(pos, "已开启通路方块@")) {
+            return true;
+        }
         return this.breakAuxiliaryBlock(pos, "已开路@");
     }
 
@@ -5755,6 +6262,10 @@ public class AIPlayerEntity extends PathfinderMob {
         }
         switch (action.type()) {
             case MOVE_TO_TARGET -> {
+                if ("owner".equals(action.targetKey())
+                        && this.tryTeleportToOwnerIfTooFar("距离过远，已瞬移跟随主人@")) {
+                    return ActionExecutionResult.SUCCESS;
+                }
                 BlockPos target = this.resolveRuntimeTarget(action.targetKey(), action.fallbackTarget());
                 if (target == null) {
                     this.reportTaskFailure(this.activeTaskName, "无法解析动作目标：" + action.label());

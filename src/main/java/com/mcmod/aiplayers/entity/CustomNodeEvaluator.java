@@ -84,9 +84,13 @@ final class CustomNodeEvaluator {
                 || state.is(Blocks.DIRT)
                 || state.is(Blocks.GRASS_BLOCK)
                 || state.is(Blocks.COARSE_DIRT)
+                || state.is(Blocks.ROOTED_DIRT)
                 || state.is(Blocks.GRAVEL)
                 || state.is(Blocks.SAND)
-                || state.is(Blocks.RED_SAND);
+                || state.is(Blocks.RED_SAND)
+                || state.is(Blocks.CLAY)
+                || state.is(Blocks.SNOW)
+                || state.is(Blocks.SNOW_BLOCK);
     }
 
     double breakPenalty(BlockPos pos) {
@@ -101,7 +105,10 @@ final class CustomNodeEvaluator {
             return 0.2D;
         }
         if (state.is(Blocks.DIRT) || state.is(Blocks.GRASS_BLOCK) || state.is(Blocks.COARSE_DIRT) || state.is(Blocks.GRAVEL) || state.is(Blocks.SAND) || state.is(Blocks.RED_SAND)) {
-            return 0.55D;
+            return 0.42D;
+        }
+        if (state.is(Blocks.STONE) || state.is(Blocks.DEEPSLATE) || state.is(Blocks.COBBLESTONE) || state.is(Blocks.COBBLED_DEEPSLATE) || state.is(Blocks.NETHERRACK)) {
+            return 0.85D;
         }
         return 1.2D;
     }
@@ -123,6 +130,39 @@ final class CustomNodeEvaluator {
         if (floor.is(Blocks.SOUL_SAND) || floor.is(Blocks.HONEY_BLOCK)) {
             penalty += 0.9D;
         }
+        if (this.isWaterNode(pos)) {
+            penalty += 0.35D;
+        }
+        if (this.isLavaAdjacent(pos)) {
+            penalty += 2.2D;
+        }
+        if (this.isDarkNode(pos)) {
+            penalty += 0.18D;
+        }
         return penalty;
+    }
+
+    private boolean isLavaAdjacent(BlockPos pos) {
+        if (pos == null) {
+            return false;
+        }
+        if (this.entity.level().getFluidState(pos).is(FluidTags.LAVA) || this.entity.level().getFluidState(pos.above()).is(FluidTags.LAVA)) {
+            return true;
+        }
+        for (BlockPos neighbor : new BlockPos[]{
+                pos.north(), pos.south(), pos.east(), pos.west(), pos.below(), pos.above()
+        }) {
+            if (this.entity.level().getFluidState(neighbor).is(FluidTags.LAVA)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isDarkNode(BlockPos pos) {
+        if (!(this.entity.level() instanceof net.minecraft.server.level.ServerLevel serverLevel)) {
+            return false;
+        }
+        return !serverLevel.canSeeSky(pos) && serverLevel.getMaxLocalRawBrightness(pos) <= 6;
     }
 }
