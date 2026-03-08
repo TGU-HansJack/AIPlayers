@@ -6,10 +6,17 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mcmod.aiplayers.entity.ActionTask;
+import com.mcmod.aiplayers.entity.AgentBrainResponse;
 import com.mcmod.aiplayers.entity.AgentGoal;
 import com.mcmod.aiplayers.entity.AgentSnapshot;
+import com.mcmod.aiplayers.entity.BehaviorNodeSpec;
+import com.mcmod.aiplayers.entity.ConstraintSet;
 import com.mcmod.aiplayers.entity.GoalType;
 import com.mcmod.aiplayers.entity.AIPlayerEntity;
+import com.mcmod.aiplayers.entity.SharedMemorySnapshot;
+import com.mcmod.aiplayers.entity.TaskRequest;
+import com.mcmod.aiplayers.entity.WorldModelSnapshot;
 import com.mcmod.aiplayers.knowledge.KnowledgeManager;
 import com.mcmod.aiplayers.system.AIAgentPlan;
 import java.io.IOException;
@@ -84,6 +91,10 @@ public final class AIServiceManager {
                 && !config.goalModel.isBlank();
     }
 
+    public static boolean canUseBrainPlanningService() {
+        return canUseGoalPlanningService();
+    }
+
     public static boolean canUseExternalService() {
         return canUseConversationService();
     }
@@ -151,6 +162,36 @@ public final class AIServiceManager {
                             return null;
                         }
                         return parseGoalPlanHttpResponse(response);
+                    });
+        } catch (IllegalArgumentException ex) {
+            lastStatus = ex.getClass().getSimpleName() + ": " + ex.getMessage();
+            return CompletableFuture.completedFuture(null);
+        }
+    }
+
+    public static CompletableFuture<AgentBrainResponse> tryPlanBrainAsync(
+            AIPlayerEntity companion,
+            WorldModelSnapshot worldModel,
+            SharedMemorySnapshot sharedMemory,
+            TaskRequest taskRequest,
+            AgentSnapshot compatibilitySnapshot) {
+        if (!canUseBrainPlanningService()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        try {
+            HttpClient client = createClient();
+            HttpRequest request = buildBrainPlanningRequest(companion, worldModel, sharedMemory, taskRequest, compatibilitySnapshot);
+            lastStatus = "Brain 规划请求中";
+            return sendAsyncWithRetries(client, request, "Brain规划")
+                    .handle((response, throwable) -> {
+                        if (throwable != null) {
+                            Throwable cause = throwable instanceof CompletionException completion && completion.getCause() != null
+                                    ? completion.getCause()
+                                    : throwable;
+                            lastStatus = normalizeFailureStatus("Brain规划", cause);
+                            return null;
+                        }
+                        return parseBrainPlanHttpResponse(response);
                     });
         } catch (IllegalArgumentException ex) {
             lastStatus = ex.getClass().getSimpleName() + ": " + ex.getMessage();
@@ -291,6 +332,30 @@ public final class AIServiceManager {
         return createRequest(root, config.goalModel, true);
     }
 
+    private static HttpRequest buildBrainPlanningRequest(
+            AIPlayerEntity companion,
+            WorldModelSnapshot worldModel,
+            SharedMemorySnapshot sharedMemory,
+            TaskRequest taskRequest,
+            AgentSnapshot compatibilitySnapshot) {
+        JsonObject root = new JsonObject();
+        root.addProperty("model", config.goalModel);
+        root.addProperty("temperature", 0.15D);
+        root.addProperty("max_tokens", GOAL_PLAN_MAX_TOKENS + 260);
+        root.addProperty("stream", false);
+        JsonArray messages = new JsonArray();
+        JsonObject system = new JsonObject();
+        system.addProperty("role", "system");
+        system.addProperty("content", buildBrainPlanningSystemPrompt());
+        messages.add(system);
+        JsonObject user = new JsonObject();
+        user.addProperty("role", "user");
+        user.addProperty("content", buildBrainPlanningUserPrompt(companion, worldModel, sharedMemory, taskRequest, compatibilitySnapshot));
+        messages.add(user);
+        root.add("messages", messages);
+        return createRequest(root, config.goalModel, true);
+    }
+
     private static HttpRequest createRequest(JsonObject root, String model, boolean planningRequest) {
         String endpoint = resolveApiEndpoint(config.url);
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(endpoint))
@@ -414,6 +479,19 @@ public final class AIServiceManager {
                 + "你只能做高层目标选择，不能假设拥有未实现的能力。";
     }
 
+    private static String buildBrainPlanningSystemPrompt() {
+        return "你是 Minecraft AI 同伴的 Agent Brain。"
+                + "请只返回 JSON。"
+                + "顶层字段必须包含 task、priority、constraints、subtree、fallbackTask、reasoning。"
+                + "task 和 fallbackTask 是对象，字段为 taskType、label、args、priority。"
+                + "taskType 只能从 idle,follow_owner,guard_owner,survive,collect_wood,collect_ore,collect_food,build_shelter,deliver_item,explore_area,recover_self,talk_only 中选择。"
+                + "subtree 是行为树节点，对象字段为 type、label、condition、action、children、args、timeoutTicks。"
+                + "允许的 type 只有 selector、sequence、condition、action、repeat_until、timeout。"
+                + "action 节点的 action 对象字段为 actionType、label、args。"
+                + "允许的 actionType 只有 move_to、look_at、equip_tool、mine_block、chop_tree、collect_drops、attack_target、place_block、bridge、tunnel、open_container、consume_food、recover_self、observe、harvest_crop、deliver_item。"
+                + "不要输出未定义字段，不要假设模组不存在的能力，不要直接下发任意 controller 指令。";
+    }
+
     private static String buildConversationUserPrompt(AIPlayerEntity companion, ServerPlayer speaker, String message) {
         return "玩家消息：" + message + "\n"
                 + "玩家名：" + speaker.getName().getString() + "\n"
@@ -454,6 +532,76 @@ public final class AIServiceManager {
                 + "最近失败：" + snapshot.memory().lastFailure() + "\n"
                 + "最近学习：" + snapshot.memory().lastLearning() + "\n"
                 + "团队知识：" + TeamSummary.safe(companion);
+    }
+
+    private static String buildBrainPlanningUserPrompt(
+            AIPlayerEntity companion,
+            WorldModelSnapshot worldModel,
+            SharedMemorySnapshot sharedMemory,
+            TaskRequest taskRequest,
+            AgentSnapshot compatibilitySnapshot) {
+        return "AI 名称：" + companion.getAIName() + "\n"
+                + "请求任务：" + (taskRequest == null ? "idle" : taskRequest.taskType()) + "\n"
+                + "请求标签：" + (taskRequest == null ? "待命" : taskRequest.label()) + "\n"
+                + "WorldModel 摘要：" + (worldModel == null ? "无" : worldModel.summary()) + "\n"
+                + "观察：" + (worldModel == null ? "无" : worldModel.observation()) + "\n"
+                + "认知：" + (worldModel == null ? "无" : worldModel.cognition()) + "\n"
+                + "资源：" + formatSpatialFacts(worldModel == null ? List.of() : worldModel.resources()) + "\n"
+                + "结构：" + formatSpatialFacts(worldModel == null ? List.of() : worldModel.structures()) + "\n"
+                + "危险：" + formatSpatialFacts(worldModel == null ? List.of() : worldModel.dangers()) + "\n"
+                + "附近实体：" + formatEntityFacts(worldModel == null ? List.of() : worldModel.nearbyEntities()) + "\n"
+                + "库存：" + formatInventoryFacts(worldModel == null ? List.of() : worldModel.inventory()) + "\n"
+                + "装备：" + formatEquipmentFacts(worldModel == null ? List.of() : worldModel.equipment()) + "\n"
+                + "导航：" + (worldModel == null ? "无" : worldModel.navigation().status()) + "\n"
+                + "共享记忆：" + (sharedMemory == null ? "无" : sharedMemory.summary()) + "\n"
+                + "共享失败：" + (sharedMemory == null ? List.of() : sharedMemory.recentFailures()) + "\n"
+                + "共享任务结果：" + (sharedMemory == null ? List.of() : sharedMemory.taskOutcomes()) + "\n"
+                + "兼容快照目标：" + (compatibilitySnapshot == null ? "无" : compatibilitySnapshot.currentGoal().type().commandName()) + "\n"
+                + "兼容快照动作：" + (compatibilitySnapshot == null ? "无" : compatibilitySnapshot.currentAction()) + "\n"
+                + "路径状态：" + (compatibilitySnapshot == null ? "无" : compatibilitySnapshot.pathStatus()) + "\n"
+                + "知识库摘要：" + KnowledgeManager.getStatusSummary() + "\n"
+                + "合成链提示：" + KnowledgeManager.getCraftingHintSummary() + "\n"
+                + "生物弱点提示：" + KnowledgeManager.getMobKnowledgeSummary();
+    }
+
+    private static String formatSpatialFacts(List<WorldModelSnapshot.SpatialFact> facts) {
+        if (facts == null || facts.isEmpty()) {
+            return "无";
+        }
+        return facts.stream()
+                .limit(8)
+                .map(fact -> fact.kind() + "@" + formatPos(fact.pos()))
+                .toList()
+                .toString();
+    }
+
+    private static String formatEntityFacts(List<WorldModelSnapshot.EntityFact> facts) {
+        if (facts == null || facts.isEmpty()) {
+            return "无";
+        }
+        return facts.stream()
+                .limit(8)
+                .map(fact -> fact.kind() + ":" + fact.label() + "@" + formatPos(fact.pos()))
+                .toList()
+                .toString();
+    }
+
+    private static String formatInventoryFacts(List<WorldModelSnapshot.InventoryFact> facts) {
+        if (facts == null || facts.isEmpty()) {
+            return "空";
+        }
+        return facts.stream().limit(12).map(fact -> fact.label() + "x" + fact.count()).toList().toString();
+    }
+
+    private static String formatEquipmentFacts(List<WorldModelSnapshot.EquipmentFact> facts) {
+        if (facts == null || facts.isEmpty()) {
+            return "空";
+        }
+        return facts.stream().limit(8).map(fact -> fact.slot() + "=" + fact.label()).toList().toString();
+    }
+
+    private static String formatPos(net.minecraft.core.BlockPos pos) {
+        return pos == null ? "?" : (pos.getX() + "," + pos.getY() + "," + pos.getZ());
     }
 
     private static AIServiceResponse parseConversationHttpResponse(HttpResponse<String> response) {
@@ -513,6 +661,170 @@ public final class AIServiceManager {
         } catch (RuntimeException ignored) {
         }
         return null;
+    }
+
+    private static AgentBrainResponse parseBrainPlanHttpResponse(HttpResponse<String> response) {
+        if (response == null || response.statusCode() < 200 || response.statusCode() >= 300) {
+            if (response == null) {
+                lastStatus = "Brain规划无响应";
+            } else {
+                lastStatus = "Brain规划 HTTP " + response.statusCode();
+            }
+            return null;
+        }
+        AgentBrainResponse parsed = parseBrainPlanResponse(response.body());
+        if (parsed == null) {
+            lastStatus = "Brain规划返回体无法解析";
+        } else {
+            lastStatus = "Brain规划成功";
+        }
+        return parsed;
+    }
+
+    private static AgentBrainResponse parseBrainPlanResponse(String body) {
+        try {
+            JsonObject root = JsonParser.parseString(body).getAsJsonObject();
+            String content = extractAssistantContent(root);
+            if (content != null && !content.isBlank()) {
+                JsonObject object = JsonParser.parseString(extractJsonCandidate(content)).getAsJsonObject();
+                return parseBrainPlanObject(object);
+            }
+            if (looksLikeBrainPlanRoot(root)) {
+                return parseBrainPlanObject(root);
+            }
+        } catch (RuntimeException ignored) {
+        }
+        return null;
+    }
+
+    private static AgentBrainResponse parseBrainPlanObject(JsonObject object) {
+        if (object == null) {
+            return null;
+        }
+        TaskRequest task = parseTaskRequest(firstJsonObject(object, "task"));
+        if (task == null) {
+            task = new TaskRequest(
+                    firstNonBlank(getString(object, "taskType"), getString(object, "goalType"), getString(object, "goal")),
+                    firstNonBlank(getString(object, "label"), getString(object, "reasoning"), getString(object, "goal")),
+                    parseStringMap(firstJsonObject(object, "taskArgs", "goalArgs", "args")),
+                    parseInt(object.get("priority"), 50),
+                    false,
+                    "brain-api",
+                    firstNonBlank(getString(object, "fallbackTask"), getString(object, "fallbackGoal"), GoalType.SURVIVE.commandName()));
+        }
+        TaskRequest fallbackTask = parseTaskRequest(firstJsonObject(object, "fallbackTask"));
+        if (fallbackTask == null) {
+            fallbackTask = new TaskRequest(
+                    firstNonBlank(getString(object, "fallbackGoal"), GoalType.SURVIVE.commandName()),
+                    firstNonBlank(getString(object, "fallbackGoal"), "fallback"),
+                    Map.of(),
+                    20,
+                    false,
+                    "brain-api",
+                    GoalType.SURVIVE.commandName());
+        }
+        ConstraintSet constraints = new ConstraintSet(parseStringList(object.getAsJsonArray("constraints")), parseStringMap(firstJsonObject(object, "constraintMeta", "constraintArgs", "constraintMetadata")));
+        BehaviorNodeSpec subtree = parseBehaviorNodeSpec(firstJsonObject(object, "subtree", "tree", "behaviorTree"));
+        if (subtree == null) {
+            subtree = BehaviorNodeSpec.action(task.label(), mapGoalToDefaultAction(task.goalType()), task.args());
+        }
+        return new AgentBrainResponse(
+                task,
+                parseInt(object.get("priority"), task.priority()),
+                constraints,
+                subtree,
+                fallbackTask,
+                firstNonBlank(getString(object, "reasoning"), getString(object, "speechReply"), task.label()),
+                "brain-api");
+    }
+
+    private static TaskRequest parseTaskRequest(JsonObject object) {
+        if (object == null) {
+            return null;
+        }
+        String taskType = firstNonBlank(getString(object, "taskType"), getString(object, "goalType"), getString(object, "goal"));
+        if (taskType == null || taskType.isBlank()) {
+            return null;
+        }
+        return new TaskRequest(
+                taskType,
+                firstNonBlank(getString(object, "label"), getString(object, "reasoning"), taskType),
+                parseStringMap(firstJsonObject(object, "args", "taskArgs", "goalArgs")),
+                parseInt(object.get("priority"), 50),
+                false,
+                firstNonBlank(getString(object, "source"), "brain-api"),
+                firstNonBlank(getString(object, "fallbackTask"), getString(object, "fallbackGoal"), GoalType.SURVIVE.commandName()));
+    }
+
+    private static BehaviorNodeSpec parseBehaviorNodeSpec(JsonObject object) {
+        if (object == null) {
+            return null;
+        }
+        JsonArray childrenArray = object.getAsJsonArray("children");
+        List<BehaviorNodeSpec> children = new ArrayList<>();
+        if (childrenArray != null) {
+            for (JsonElement element : childrenArray) {
+                if (element != null && element.isJsonObject()) {
+                    BehaviorNodeSpec child = parseBehaviorNodeSpec(element.getAsJsonObject());
+                    if (child != null) {
+                        children.add(child);
+                    }
+                }
+            }
+        }
+        ActionTask action = parseActionTask(firstJsonObject(object, "action"));
+        String type = defaultString(getString(object, "type"), action == null ? "sequence" : "action");
+        return new BehaviorNodeSpec(
+                getString(object, "id"),
+                type,
+                firstNonBlank(getString(object, "label"), getString(object, "name"), type),
+                defaultString(getString(object, "condition"), ""),
+                action,
+                children,
+                parseStringMap(firstJsonObject(object, "args")),
+                parseInt(object.get("timeoutTicks"), 0));
+    }
+
+    private static ActionTask parseActionTask(JsonObject object) {
+        if (object == null) {
+            return null;
+        }
+        String actionType = firstNonBlank(getString(object, "actionType"), getString(object, "type"), getString(object, "name"));
+        if (actionType == null || actionType.isBlank()) {
+            return null;
+        }
+        return new ActionTask(actionType, firstNonBlank(getString(object, "label"), actionType), parseStringMap(firstJsonObject(object, "args")));
+    }
+
+    private static List<String> parseStringList(JsonArray array) {
+        if (array == null || array.isEmpty()) {
+            return List.of();
+        }
+        List<String> values = new ArrayList<>();
+        for (JsonElement element : array) {
+            if (element == null || element.isJsonNull()) {
+                continue;
+            }
+            values.add(element.getAsString());
+        }
+        return values;
+    }
+
+    private static String mapGoalToDefaultAction(GoalType goalType) {
+        if (goalType == null) {
+            return "observe";
+        }
+        return switch (goalType) {
+            case FOLLOW_OWNER -> "move_to";
+            case GUARD_OWNER -> "attack_target";
+            case COLLECT_WOOD -> "chop_tree";
+            case COLLECT_ORE -> "mine_block";
+            case COLLECT_FOOD -> "harvest_crop";
+            case BUILD_SHELTER -> "place_block";
+            case DELIVER_ITEM -> "deliver_item";
+            case RECOVER_SELF -> "recover_self";
+            case EXPLORE_AREA, SURVIVE, TALK_ONLY, IDLE -> "observe";
+        };
     }
 
     private static String extractAssistantContent(JsonObject root) {
@@ -609,6 +921,18 @@ public final class AIServiceManager {
                 || root.has("controllerAction")
                 || root.has("controllerArgs")
                 || root.has("controller_args");
+    }
+
+    private static boolean looksLikeBrainPlanRoot(JsonObject root) {
+        if (root == null) {
+            return false;
+        }
+        return root.has("task")
+                || root.has("taskType")
+                || root.has("subtree")
+                || root.has("behaviorTree")
+                || root.has("fallbackTask")
+                || root.has("reasoning");
     }
 
     private static boolean looksLikeGoalPlanRoot(JsonObject root) {

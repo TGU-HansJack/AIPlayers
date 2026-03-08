@@ -1492,6 +1492,122 @@ public class AIPlayerEntity extends PathfinderMob {
                 this.getCognitiveSummary());
     }
 
+    WorldModelSnapshot buildWorldModelSnapshot(PathManager movementController) {
+        WorldScanner.PerceptionResult perception = WorldScanner.scanFor(this);
+        List<WorldModelSnapshot.SpatialFact> resources = new ArrayList<>();
+        List<WorldModelSnapshot.SpatialFact> dangers = new ArrayList<>();
+        List<WorldModelSnapshot.SpatialFact> structures = new ArrayList<>();
+        List<WorldModelSnapshot.SpatialFact> nearbyBlocks = new ArrayList<>();
+        List<WorldModelSnapshot.SpatialFact> interactables = new ArrayList<>();
+        List<WorldModelSnapshot.EntityFact> entities = new ArrayList<>();
+        List<WorldModelSnapshot.InventoryFact> inventory = new ArrayList<>();
+        List<WorldModelSnapshot.EquipmentFact> equipment = new ArrayList<>();
+
+        BlockPos origin = this.blockPosition();
+        if (perception.wood() != null && perception.wood().pos() != null) {
+            resources.add(new WorldModelSnapshot.SpatialFact("wood", "wood", perception.wood().pos(), origin.distSqr(perception.wood().pos())));
+        }
+        if (perception.ore() != null && perception.ore().pos() != null) {
+            resources.add(new WorldModelSnapshot.SpatialFact("ore", "ore", perception.ore().pos(), origin.distSqr(perception.ore().pos())));
+        }
+        if (perception.crop() != null && perception.crop().pos() != null) {
+            resources.add(new WorldModelSnapshot.SpatialFact("crop", "crop", perception.crop().pos(), origin.distSqr(perception.crop().pos())));
+        }
+        if (perception.hazardNearby()) {
+            BlockPos hazard = this.findNearestHazardSource(origin, 6);
+            if (hazard != null) {
+                dangers.add(new WorldModelSnapshot.SpatialFact("hazard", "hazard", hazard, origin.distSqr(hazard)));
+            }
+        }
+        if (perception.bed() != null && perception.bed().pos() != null) {
+            structures.add(new WorldModelSnapshot.SpatialFact("bed", "bed", perception.bed().pos(), origin.distSqr(perception.bed().pos())));
+            interactables.add(new WorldModelSnapshot.SpatialFact("bed", "bed", perception.bed().pos(), origin.distSqr(perception.bed().pos())));
+        }
+        if (perception.chest() != null && perception.chest().pos() != null) {
+            structures.add(new WorldModelSnapshot.SpatialFact("chest", "chest", perception.chest().pos(), origin.distSqr(perception.chest().pos())));
+            interactables.add(new WorldModelSnapshot.SpatialFact("chest", "chest", perception.chest().pos(), origin.distSqr(perception.chest().pos())));
+        }
+        if (perception.crafting() != null && perception.crafting().pos() != null) {
+            structures.add(new WorldModelSnapshot.SpatialFact("crafting", "crafting", perception.crafting().pos(), origin.distSqr(perception.crafting().pos())));
+            interactables.add(new WorldModelSnapshot.SpatialFact("crafting", "crafting", perception.crafting().pos(), origin.distSqr(perception.crafting().pos())));
+        }
+        if (perception.furnace() != null && perception.furnace().pos() != null) {
+            structures.add(new WorldModelSnapshot.SpatialFact("furnace", "furnace", perception.furnace().pos(), origin.distSqr(perception.furnace().pos())));
+            interactables.add(new WorldModelSnapshot.SpatialFact("furnace", "furnace", perception.furnace().pos(), origin.distSqr(perception.furnace().pos())));
+        }
+        nearbyBlocks.addAll(resources);
+        nearbyBlocks.addAll(structures);
+        nearbyBlocks.addAll(dangers);
+
+        ServerPlayer owner = this.getOwnerPlayer();
+        if (owner != null) {
+            entities.add(new WorldModelSnapshot.EntityFact("owner", owner.getName().getString(), owner.blockPosition(), origin.distSqr(owner.blockPosition()), false, owner.isAlive()));
+        }
+        if (this.observedHostile != null && this.observedHostile.isAlive()) {
+            entities.add(new WorldModelSnapshot.EntityFact("hostile", this.observedHostile.getName().getString(), this.observedHostile.blockPosition(), origin.distSqr(this.observedHostile.blockPosition()), true, true));
+        }
+        if (this.observedDrop != null && this.observedDrop.isAlive()) {
+            entities.add(new WorldModelSnapshot.EntityFact("drop", this.observedDrop.getItem().getHoverName().getString(), this.observedDrop.blockPosition(), origin.distSqr(this.observedDrop.blockPosition()), false, true));
+        }
+
+        for (ItemStack stack : this.backpack) {
+            if (stack.isEmpty()) {
+                continue;
+            }
+            inventory.add(new WorldModelSnapshot.InventoryFact(BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(), stack.getHoverName().getString(), stack.getCount()));
+            if (inventory.size() >= 16) {
+                break;
+            }
+        }
+        for (EquipmentSlot slot : EquipmentSlot.values()) {
+            ItemStack stack = this.getItemBySlot(slot);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            equipment.add(new WorldModelSnapshot.EquipmentFact(slot.getName(), BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(), stack.getHoverName().getString()));
+        }
+
+        WorldModelSnapshot.NavigationState navigation = movementController == null
+                ? WorldModelSnapshot.NavigationState.idle()
+                : new WorldModelSnapshot.NavigationState(movementController.getActiveTargetPos(), movementController.isPathActive(), movementController.isRecovering(), movementController.getPathStatus());
+        WorldModelSnapshot.StuckState stuckState = new WorldModelSnapshot.StuckState(
+                this.stuckNavigationTicks >= NAVIGATION_STUCK_THRESHOLD / 2 || (movementController != null && movementController.isRecovering()),
+                this.stuckNavigationTicks,
+                movementController != null && movementController.isRecovering());
+
+        return new WorldModelSnapshot(
+                this.level().getGameTime(),
+                this.safeMode(),
+                nearbyBlocks.stream().sorted(Comparator.comparingDouble(WorldModelSnapshot.SpatialFact::distanceSqr)).limit(16).toList(),
+                entities.stream().sorted(Comparator.comparingDouble(WorldModelSnapshot.EntityFact::distanceSqr)).toList(),
+                resources.stream().sorted(Comparator.comparingDouble(WorldModelSnapshot.SpatialFact::distanceSqr)).toList(),
+                dangers.stream().sorted(Comparator.comparingDouble(WorldModelSnapshot.SpatialFact::distanceSqr)).toList(),
+                structures.stream().sorted(Comparator.comparingDouble(WorldModelSnapshot.SpatialFact::distanceSqr)).toList(),
+                inventory,
+                equipment,
+                navigation,
+                stuckState,
+                interactables.stream().sorted(Comparator.comparingDouble(WorldModelSnapshot.SpatialFact::distanceSqr)).toList(),
+                owner == null ? null : owner.blockPosition(),
+                this.observedHostile == null ? null : this.observedHostile.blockPosition(),
+                this.observedDrop == null ? null : this.observedDrop.blockPosition(),
+                owner != null,
+                this.isOwnerUnderThreat(),
+                this.observedHostile != null && this.observedHostile.isAlive(),
+                this.getHealth() <= 10.0F,
+                this.hasLowFoodSupply(),
+                this.hasLowTools(),
+                this.isInWater() || this.isUnderWater() || this.isInLava(),
+                this.isOnFire(),
+                (this.level().getDayTime() % 24000L) >= 12500L,
+                this.pendingDeliveryRequest != null && !this.pendingDeliveryRequest.isBlank(),
+                this.shelterAnchor != null && this.findNextShelterPlacement() == null,
+                this.countAvailableBuildingUnits(),
+                Math.max(0, BACKPACK_SIZE - this.getUsedBackpackSlots()),
+                this.getObservationSummary(),
+                this.getCognitiveSummary());
+    }
+
     public boolean hasRememberedHarvestTarget(boolean woodTask) {
         return woodTask ? this.isValidHarvestTarget(this.rememberedLog, true) : this.isValidHarvestTarget(this.rememberedOre, false);
     }
@@ -4991,6 +5107,35 @@ public class AIPlayerEntity extends PathfinderMob {
         return total;
     }
 
+    private BlockPos findNearestHazardSource(BlockPos origin, int radius) {
+        if (origin == null) {
+            return null;
+        }
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        for (int x = -radius; x <= radius; x++) {
+            for (int y = -3; y <= 3; y++) {
+                for (int z = -radius; z <= radius; z++) {
+                    cursor.set(origin.getX() + x, origin.getY() + y, origin.getZ() + z);
+                    BlockState state = this.level().getBlockState(cursor);
+                    if (state == null || state.isAir() || state.getFluidState().isEmpty()) {
+                        continue;
+                    }
+                    if (!state.getFluidState().is(FluidTags.WATER) && !state.getFluidState().is(FluidTags.LAVA)) {
+                        continue;
+                    }
+                    double distance = cursor.distSqr(origin);
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        best = cursor.immutable();
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
     private int countBackpackItemById(String itemId) {
         Item item = this.resolveItemById(itemId);
         if (item == Items.AIR) {
@@ -6430,6 +6575,22 @@ public class AIPlayerEntity extends PathfinderMob {
 
     boolean runtimeHasNearbyDrops() {
         return this.observedDrop != null && this.observedDrop.isAlive();
+    }
+
+    boolean runtimeConsumeRecoveryFood() {
+        ItemStack food = this.findBestRecoveryFood();
+        if (food.isEmpty()) {
+            return false;
+        }
+        if (!this.consumeBackpackItem(food.getItem(), 1)) {
+            return false;
+        }
+        this.heal(this.getHealingValue(food));
+        this.crouchTicks = Math.max(this.crouchTicks, 8);
+        this.lastObservation = "已食用" + food.getHoverName().getString() + "恢复状态。";
+        this.remember("生存", this.lastObservation);
+        this.reportTaskProgress(this.activeTaskName, this.lastObservation);
+        return true;
     }
 
     boolean runtimeCollectNearbyDrops() {
