@@ -3204,56 +3204,20 @@ public class AIPlayerEntity extends PathfinderMob {
             return null;
         }
         if (woodTask) {
-            BlockPos base = this.normalizeHarvestTarget(origin, true);
-            ArrayDeque<BlockPos> frontier = new ArrayDeque<>();
-            Set<BlockPos> visited = new HashSet<>();
-            frontier.add(base);
-            visited.add(base);
-
-            BlockPos bestPos = null;
-            double bestScore = Double.MAX_VALUE;
-            int expanded = 0;
-            while (!frontier.isEmpty() && expanded < 192) {
-                BlockPos current = frontier.poll();
-                expanded++;
-                for (Direction direction : Direction.values()) {
-                    BlockPos candidate = current.relative(direction);
-                    if (Math.abs(candidate.getX() - base.getX()) > 4
-                            || Math.abs(candidate.getY() - base.getY()) > 16
-                            || Math.abs(candidate.getZ() - base.getZ()) > 4) {
-                        continue;
-                    }
-                    if (!visited.add(candidate)) {
-                        continue;
-                    }
-                    BlockState candidateState = this.level().getBlockState(candidate);
-                    if (!KnowledgeManager.isTreeLog(candidateState) && !candidateState.is(BlockTags.LOGS)) {
-                        continue;
-                    }
-                    frontier.add(candidate);
-                    if (candidate.equals(base)) {
-                        continue;
-                    }
-                    if (!this.isHarvestTargetReachable(candidate, true)) {
-                        continue;
-                    }
-
-                    double score = base.distSqr(candidate) + this.distanceToSqr(Vec3.atCenterOf(candidate));
-                    if (candidate.getY() > base.getY()) {
-                        score -= 1.1D * (candidate.getY() - base.getY());
-                    }
-                    if (this.canHarvestFromHere(candidate)) {
-                        score -= 1.2D;
-                    }
-                    if (score < bestScore) {
-                        bestScore = score;
-                        bestPos = candidate.immutable();
-                    }
-                }
+            if (!(this.level() instanceof ServerLevel serverLevel)) {
+                return null;
             }
-            if (bestPos != null) {
-                return bestPos;
+            BlockPos seed = this.normalizeHarvestTarget(origin, true);
+            BlockPos nextTarget = TreeChopper.nextTreeLog(
+                    serverLevel,
+                    seed,
+                    candidate -> !candidate.equals(origin)
+                            && this.isValidHarvestTarget(candidate, true)
+                            && this.isHarvestTargetReachable(candidate, true));
+            if (nextTarget != null) {
+                return nextTarget.immutable();
             }
+            SearchBlocks.resetVisited();
             return this.resolveHarvestTarget(true, this.findNearestHarvestBlock(true));
         }
 
@@ -3473,6 +3437,7 @@ public class AIPlayerEntity extends PathfinderMob {
         this.harvestTaskMoveTarget = null;
         this.harvestTaskStateTick = this.tickCount;
         this.harvestTaskLastProgressTick = this.tickCount;
+        SearchBlocks.resetVisited();
     }
 
     private void touchHarvestTaskProgress() {
@@ -3515,7 +3480,8 @@ public class AIPlayerEntity extends PathfinderMob {
         if (target == null || !this.isValidHarvestTarget(target, woodTask)) {
             this.harvestTaskTarget = null;
             this.harvestTaskObstacle = null;
-            this.harvestTaskMoveTarget = this.resolveRuntimeTarget("explore", this.blockPosition());
+            BlockPos exploreTarget = this.findExplorationDestination();
+            this.harvestTaskMoveTarget = this.runtimeResolveMovementTarget(exploreTarget != null ? exploreTarget : this.blockPosition());
             this.setHarvestTaskState(HarvestTaskState.SEARCH_TARGET);
             return new HarvestTaskView(this.harvestTaskState, woodTask, null, null, this.harvestTaskMoveTarget);
         }
@@ -4325,36 +4291,46 @@ public class AIPlayerEntity extends PathfinderMob {
         if (!woodTask || pos == null) {
             return pos;
         }
-
-        BlockPos current = pos;
-        while (KnowledgeManager.isTreeLog(this.level().getBlockState(current.below()))
-                || this.level().getBlockState(current.below()).is(BlockTags.LOGS)) {
-            current = current.below();
+        BlockPos seed = pos.immutable();
+        BlockPos base = seed;
+        int descendGuard = 0;
+        while (descendGuard < 20 && (KnowledgeManager.isTreeLog(this.level().getBlockState(base.below()))
+                || this.level().getBlockState(base.below()).is(BlockTags.LOGS))) {
+            base = base.below();
+            descendGuard++;
         }
 
-        BlockPos best = current;
-        double bestScore = this.distanceToSqr(Vec3.atCenterOf(current));
-        for (int x = -1; x <= 1; x++) {
-            for (int y = 0; y <= 2; y++) {
-                for (int z = -1; z <= 1; z++) {
-                    BlockPos candidate = current.offset(x, y, z);
+        BlockPos best = null;
+        double bestScore = Double.MAX_VALUE;
+        for (int x = -2; x <= 2; x++) {
+            for (int y = -3; y <= 12; y++) {
+                for (int z = -2; z <= 2; z++) {
+                    BlockPos candidate = base.offset(x, y, z);
                     BlockState candidateState = this.level().getBlockState(candidate);
                     if (!KnowledgeManager.isTreeLog(candidateState) && !candidateState.is(BlockTags.LOGS)) {
                         continue;
                     }
-
                     double score = this.distanceToSqr(Vec3.atCenterOf(candidate));
-                    if (candidate.getY() == current.getY()) {
-                        score -= 0.5D;
+                    if (candidate.getY() > base.getY()) {
+                        score -= 0.9D * (candidate.getY() - base.getY());
                     }
-                    if (score < bestScore) {
+                    if (candidate.getY() > seed.getY()) {
+                        score -= 0.6D * (candidate.getY() - seed.getY());
+                    }
+                    if (this.canHarvestFromHere(candidate)) {
+                        score -= 1.4D;
+                    }
+                    if (best == null || score < bestScore) {
                         bestScore = score;
-                        best = candidate;
+                        best = candidate.immutable();
                     }
                 }
             }
         }
-        return best;
+        if (best != null) {
+            return best;
+        }
+        return (KnowledgeManager.isTreeLog(this.level().getBlockState(seed)) || this.level().getBlockState(seed).is(BlockTags.LOGS)) ? seed : null;
     }
 
     private BlockPos resolveHarvestTarget(boolean woodTask, BlockPos seed) {
@@ -4362,6 +4338,7 @@ public class AIPlayerEntity extends PathfinderMob {
         if (this.isHarvestTargetReachable(preferred, woodTask)) {
             return preferred;
         }
+        SearchBlocks.resetVisited();
         BlockPos scanned = this.normalizeHarvestTarget(this.findNearestHarvestBlock(woodTask), woodTask);
         if (this.isHarvestTargetReachable(scanned, woodTask)) {
             return scanned;
@@ -4385,33 +4362,19 @@ public class AIPlayerEntity extends PathfinderMob {
     }
 
     private BlockPos findNearestHarvestBlock(boolean woodTask) {
-        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
-        BlockPos bestPos = null;
-        double bestDistance = Double.MAX_VALUE;
-        BlockPos origin = this.blockPosition();
-
-        for (int x = -SCAN_RADIUS; x <= SCAN_RADIUS; x++) {
-            for (int y = -SCAN_VERTICAL_DOWN; y <= SCAN_VERTICAL_UP; y++) {
-                for (int z = -SCAN_RADIUS; z <= SCAN_RADIUS; z++) {
-                    cursor.set(origin.getX() + x, origin.getY() + y, origin.getZ() + z);
-                    BlockState state = this.level().getBlockState(cursor);
-                    boolean matches = woodTask
-                            ? (KnowledgeManager.isTreeLog(state) || state.is(BlockTags.LOGS))
-                            : this.isInterestingOre(state, cursor) && (this.isExposed(cursor) || this.findAdjacentHarvestCover(cursor, false) != null);
-                    if (!matches) {
-                        continue;
-                    }
-
-                    double distance = this.distanceToSqr(Vec3.atCenterOf(cursor));
-                    if (distance < bestDistance) {
-                        bestDistance = distance;
-                        bestPos = cursor.immutable();
-                    }
-                }
-            }
+        if (!(this.level() instanceof ServerLevel serverLevel)) {
+            return null;
         }
-
-        return bestPos;
+        BlockPos origin = this.blockPosition();
+        return SearchBlocks.searchNearest(
+                serverLevel,
+                origin,
+                SCAN_RADIUS,
+                SCAN_VERTICAL_DOWN,
+                SCAN_VERTICAL_UP,
+                (state, pos) -> woodTask
+                        ? (KnowledgeManager.isTreeLog(state) || state.is(BlockTags.LOGS))
+                        : this.isInterestingOre(state, pos) && (this.isExposed(pos) || this.findAdjacentHarvestCover(pos, false) != null));
     }
 
     private boolean canHarvestFromHere(BlockPos target) {
@@ -4535,6 +4498,13 @@ public class AIPlayerEntity extends PathfinderMob {
         return this.canStandAt(pos, false);
     }
 
+    private boolean isPassable(BlockState state, BlockPos pos) {
+        if (state == null || pos == null) {
+            return false;
+        }
+        return state.getCollisionShape(this.level(), pos).isEmpty();
+    }
+
     private boolean canStandAt(BlockPos pos, boolean allowWater) {
         if (pos == null) {
             return false;
@@ -4544,13 +4514,13 @@ public class AIPlayerEntity extends PathfinderMob {
         BlockState floor = this.level().getBlockState(pos.below());
         boolean feetInWater = this.level().getFluidState(pos).is(FluidTags.WATER);
         boolean headInWater = this.level().getFluidState(pos.above()).is(FluidTags.WATER);
-        boolean feetClear = feet.getCollisionShape(this.level(), pos).isEmpty()
+        boolean feetClear = this.isPassable(feet, pos)
                 && !this.level().getFluidState(pos).is(FluidTags.LAVA)
                 && (allowWater || !feetInWater);
-        boolean headClear = head.getCollisionShape(this.level(), pos.above()).isEmpty()
+        boolean headClear = this.isPassable(head, pos.above())
                 && !this.level().getFluidState(pos.above()).is(FluidTags.LAVA)
                 && (allowWater || !headInWater);
-        boolean floorStable = !floor.getCollisionShape(this.level(), pos.below()).isEmpty()
+        boolean floorStable = !this.isPassable(floor, pos.below())
                 && !floor.is(BlockTags.LEAVES)
                 && !this.level().getFluidState(pos.below()).is(FluidTags.LAVA);
         if (allowWater && (feetInWater || headInWater)) {
@@ -5777,6 +5747,10 @@ public class AIPlayerEntity extends PathfinderMob {
         return this.findApproachPosition(target);
     }
 
+    BlockPos runtimeFindExplorationDestination() {
+        return this.findExplorationDestination();
+    }
+
     BlockPos runtimeResolveHarvestTarget(boolean woodTask) {
         return this.updateHarvestTaskView(woodTask).target();
     }
@@ -6194,7 +6168,7 @@ public class AIPlayerEntity extends PathfinderMob {
             BlockState feetState = this.level().getBlockState(feet);
             BlockState headState = this.level().getBlockState(feet.above());
             BlockState floorState = this.level().getBlockState(feet.below());
-            if (!feetState.getCollisionShape(this.level(), feet).isEmpty() || !headState.getCollisionShape(this.level(), feet.above()).isEmpty()) {
+            if (!this.isPassable(feetState, feet) || !this.isPassable(headState, feet.above())) {
                 return false;
             }
             if (this.level().getFluidState(feet).is(FluidTags.WATER) || this.level().getFluidState(feet.above()).is(FluidTags.WATER)) {
@@ -6203,7 +6177,7 @@ public class AIPlayerEntity extends PathfinderMob {
             if (this.level().getFluidState(feet).is(FluidTags.LAVA) || this.level().getFluidState(feet.above()).is(FluidTags.LAVA)) {
                 return false;
             }
-            if (!floorState.getCollisionShape(this.level(), feet.below()).isEmpty()) {
+            if (!this.isPassable(floorState, feet.below())) {
                 continue;
             }
             if (i < samples) {

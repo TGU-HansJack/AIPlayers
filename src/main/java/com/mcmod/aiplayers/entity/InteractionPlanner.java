@@ -34,7 +34,10 @@ public final class InteractionPlanner {
 
         switch (task.state()) {
             case SEARCH_TARGET -> {
-                BlockPos searchTarget = task.moveTarget() != null ? task.moveTarget() : entity.resolveRuntimeTarget("explore", entity.blockPosition());
+                BlockPos searchTarget = task.moveTarget() != null ? task.moveTarget() : entity.runtimeFindExplorationDestination();
+                if (searchTarget == null) {
+                    searchTarget = entity.resolveRuntimeTarget("explore", entity.blockPosition());
+                }
                 if (searchTarget == null) {
                     return InteractionPlan.failed(woodTask ? "砍树交互" : "采矿交互", woodTask ? "未找到可采树木" : "未找到可采矿点");
                 }
