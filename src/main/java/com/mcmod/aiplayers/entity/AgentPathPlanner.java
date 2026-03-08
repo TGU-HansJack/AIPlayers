@@ -14,9 +14,9 @@ import net.minecraft.world.phys.Vec3;
 public final class AgentPathPlanner {
     private static final int MAX_CANDIDATE_TARGETS = 24;
     private static final int MAX_SMOOTH_LOOKAHEAD = 4;
-    private static final int SEARCH_NODE_LIMIT = 1800;
-    private static final int MAX_STEP_HEIGHT = 1;
-    private static final int MAX_DROP_HEIGHT = 2;
+    private static final int SEARCH_NODE_LIMIT = 3200;
+    private static final int MAX_STEP_HEIGHT = 2;
+    private static final int MAX_DROP_HEIGHT = 3;
 
     private AgentPathPlanner() {
     }
@@ -229,9 +229,13 @@ public final class AgentPathPlanner {
             BlockPos headBlock = base.above();
             if (evaluator.canBreakForPath(feetBlock) || evaluator.canBreakForPath(headBlock)) {
                 BlockPos clearTarget = evaluator.canBreakForPath(feetBlock) ? feetBlock : headBlock;
-                if (evaluator.canStandAt(base, true) || evaluator.isWaterNode(base)) {
+                if (evaluator.canStandAt(base, true) || evaluator.isWaterNode(base) || evaluator.canOccupyAfterBreak(base, clearTarget)) {
                     PathNodeAction action = PathNodeAction.BREAK_BLOCK;
-                    steps.add(new PathStep(base, evaluator.movementPenalty(base, false, action), action, clearTarget, false));
+                    double penalty = evaluator.movementPenalty(base, false, action) + evaluator.breakPenalty(clearTarget);
+                    if (evaluator.isSoftBreakable(clearTarget)) {
+                        penalty = Math.max(0.85D, penalty - 0.25D);
+                    }
+                    steps.add(new PathStep(base, penalty, action, clearTarget, false));
                 }
             }
 
@@ -239,6 +243,17 @@ public final class AgentPathPlanner {
             if (evaluator.canPlaceSupportAt(supportPos) && evaluator.canStandAt(base, true)) {
                 PathNodeAction action = PathNodeAction.PLACE_SUPPORT;
                 steps.add(new PathStep(base, evaluator.movementPenalty(base, true, action), action, supportPos, true));
+            }
+
+            if (evaluator.isWaterNode(base) && !evaluator.isLavaNode(base)) {
+                BlockPos swimUp = base.above();
+                if (evaluator.canStandAt(swimUp, true) && !evaluator.isLavaNode(swimUp)) {
+                    steps.add(new PathStep(swimUp, evaluator.movementPenalty(swimUp, true, PathNodeAction.NONE) + 0.18D, PathNodeAction.NONE, null, true));
+                }
+                BlockPos swimDown = base.below();
+                if (evaluator.canStandAt(swimDown, true) && !evaluator.isLavaNode(swimDown)) {
+                    steps.add(new PathStep(swimDown, evaluator.movementPenalty(swimDown, false, PathNodeAction.NONE) + 0.25D, PathNodeAction.NONE, null, false));
+                }
             }
         }
         return steps;

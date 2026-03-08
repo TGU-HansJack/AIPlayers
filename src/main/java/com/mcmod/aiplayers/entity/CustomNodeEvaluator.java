@@ -25,6 +25,43 @@ final class CustomNodeEvaluator {
         return this.entity.runtimeCanPlacePathSupport(pos);
     }
 
+    boolean canOccupyAfterBreak(BlockPos standPos, BlockPos breakPos) {
+        if (standPos == null || breakPos == null) {
+            return false;
+        }
+        BlockPos feetPos = standPos;
+        BlockPos headPos = standPos.above();
+        boolean breakFeet = breakPos.equals(feetPos);
+        boolean breakHead = breakPos.equals(headPos);
+        if (!breakFeet && !breakHead) {
+            return false;
+        }
+
+        BlockState feetState = this.entity.level().getBlockState(feetPos);
+        BlockState headState = this.entity.level().getBlockState(headPos);
+        boolean feetClear = breakFeet || feetState.getCollisionShape(this.entity.level(), feetPos).isEmpty();
+        boolean headClear = breakHead || headState.getCollisionShape(this.entity.level(), headPos).isEmpty();
+        if (!feetClear || !headClear) {
+            return false;
+        }
+
+        if (this.entity.level().getFluidState(feetPos).is(FluidTags.LAVA) || this.entity.level().getFluidState(headPos).is(FluidTags.LAVA)) {
+            return false;
+        }
+
+        boolean waterFoot = this.entity.level().getFluidState(feetPos).is(FluidTags.WATER);
+        boolean waterHead = this.entity.level().getFluidState(headPos).is(FluidTags.WATER);
+        if (waterFoot || waterHead) {
+            return true;
+        }
+
+        BlockPos floorPos = standPos.below();
+        BlockState floorState = this.entity.level().getBlockState(floorPos);
+        boolean stableFloor = !floorState.getCollisionShape(this.entity.level(), floorPos).isEmpty()
+                && !this.entity.level().getFluidState(floorPos).is(FluidTags.LAVA);
+        return stableFloor || this.canPlaceSupportAt(floorPos);
+    }
+
     boolean isWaterNode(BlockPos pos) {
         return this.entity.level().getFluidState(pos).is(FluidTags.WATER)
                 || this.entity.level().getFluidState(pos.above()).is(FluidTags.WATER);
@@ -35,10 +72,44 @@ final class CustomNodeEvaluator {
                 || this.entity.level().getFluidState(pos.above()).is(FluidTags.LAVA);
     }
 
+    boolean isSoftBreakable(BlockPos pos) {
+        if (pos == null) {
+            return false;
+        }
+        BlockState state = this.entity.level().getBlockState(pos);
+        return state.is(BlockTags.LEAVES)
+                || state.is(BlockTags.REPLACEABLE_BY_TREES)
+                || state.is(Blocks.SHORT_GRASS)
+                || state.is(Blocks.TALL_GRASS)
+                || state.is(Blocks.DIRT)
+                || state.is(Blocks.GRASS_BLOCK)
+                || state.is(Blocks.COARSE_DIRT)
+                || state.is(Blocks.GRAVEL)
+                || state.is(Blocks.SAND)
+                || state.is(Blocks.RED_SAND);
+    }
+
+    double breakPenalty(BlockPos pos) {
+        if (pos == null) {
+            return 1.0D;
+        }
+        BlockState state = this.entity.level().getBlockState(pos);
+        if (state.is(BlockTags.LEAVES) || state.is(BlockTags.REPLACEABLE_BY_TREES)) {
+            return 0.3D;
+        }
+        if (state.is(Blocks.SHORT_GRASS) || state.is(Blocks.TALL_GRASS) || state.is(Blocks.FERN) || state.is(Blocks.LARGE_FERN)) {
+            return 0.2D;
+        }
+        if (state.is(Blocks.DIRT) || state.is(Blocks.GRASS_BLOCK) || state.is(Blocks.COARSE_DIRT) || state.is(Blocks.GRAVEL) || state.is(Blocks.SAND) || state.is(Blocks.RED_SAND)) {
+            return 0.55D;
+        }
+        return 1.2D;
+    }
+
     double movementPenalty(BlockPos pos, boolean jumped, PathNodeAction action) {
         double penalty = 1.0D;
         if (this.isWaterNode(pos)) {
-            penalty += 1.3D;
+            penalty += 0.45D;
         }
         if (jumped) {
             penalty += 0.7D;

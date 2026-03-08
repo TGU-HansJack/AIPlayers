@@ -146,7 +146,11 @@ final class PlayerMovementController {
         }
         if (this.entity.isInWater() || this.entity.isUnderWater() || this.entity.isInLava()) {
             Vec3 motion = this.entity.getDeltaMovement();
-            this.entity.setDeltaMovement(motion.x * 0.92D, Math.max(motion.y, LIQUID_ASCENT_SPEED), motion.z * 0.92D);
+            boolean needAscend = this.entity.isUnderWater()
+                    || this.entity.horizontalCollision
+                    || waypoint.y > this.entity.getY() + 0.55D;
+            double minVertical = needAscend ? LIQUID_ASCENT_SPEED : 0.005D;
+            this.entity.setDeltaMovement(motion.x * 0.96D, Math.max(motion.y, minVertical), motion.z * 0.96D);
         }
     }
 
@@ -228,7 +232,7 @@ final class PlayerMovementController {
 
     private double computeAppliedSpeed(double distanceToWaypoint) {
         if (this.entity.isInWater() || this.entity.isUnderWater() || this.entity.isInLava()) {
-            return Math.min(this.speedModifier, 0.78D);
+            return Math.min(this.speedModifier, 0.92D);
         }
         if (distanceToWaypoint <= 0.36D) {
             return Math.min(this.speedModifier, 0.72D);
@@ -402,11 +406,11 @@ final class PlayerMovementController {
         if (this.entity.isInWater() || this.entity.isUnderWater()) {
             boolean needsAscend = this.entity.isUnderWater()
                     || this.entity.horizontalCollision
-                    || waypoint.y > current.y + 0.1D;
+                    || waypoint.y > current.y + 0.55D;
             shouldJump = needsAscend;
-            forward = Math.max(forward, 0.84F);
-            strafe = Mth.clamp(strafe, -0.18F, 0.18F);
-            speed = Math.min(speed, 0.20F);
+            forward = Math.max(forward, 0.92F);
+            strafe = Mth.clamp(strafe, -0.08F, 0.08F);
+            speed = Math.min(speed, 0.24F);
             sprint = false;
         }
         this.entity.runtimeSetWasdControl(forward, strafe, speed, targetYaw, sprint, shouldJump);

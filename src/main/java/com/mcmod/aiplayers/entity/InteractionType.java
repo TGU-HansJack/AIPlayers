@@ -7,6 +7,7 @@ public enum InteractionType {
     EQUIP_TOOL,
     RAISE_SHIELD,
     LOWER_SHIELD,
+    RECOVER_STUCK,
     CLEAR_PATH,
     BREAK_TARGET,
     PLACE_BLOCK,

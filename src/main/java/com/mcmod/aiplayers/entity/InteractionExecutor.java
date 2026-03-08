@@ -41,6 +41,9 @@ public final class InteractionExecutor {
                 entity.runtimeLowerShieldGuard();
                 yield ActionExecutionResult.SUCCESS;
             }
+            case RECOVER_STUCK -> entity.runtimeAttemptImmediateRecovery()
+                    ? ActionExecutionResult.RUNNING
+                    : ActionExecutionResult.SUCCESS;
             case CLEAR_PATH -> executeClearPath(entity, action);
             case BREAK_TARGET -> executeBreakTarget(entity, action);
             case PLACE_BLOCK -> executePlaceBlock(entity, action);

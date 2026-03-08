@@ -40,6 +40,10 @@ public record InteractionAction(
         return new InteractionAction(InteractionType.LOWER_SHIELD, null, 1.0D, 1.0D, label, false);
     }
 
+    static InteractionAction recoverStuck(String label) {
+        return new InteractionAction(InteractionType.RECOVER_STUCK, null, 1.0D, 1.0D, label, false);
+    }
+
     static InteractionAction clearPath(BlockPos pos, boolean woodTask, String label) {
         return new InteractionAction(InteractionType.CLEAR_PATH, pos, 1.05D, 9.0D, label, woodTask);
     }

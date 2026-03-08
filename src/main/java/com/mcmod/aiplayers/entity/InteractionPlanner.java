@@ -29,6 +29,7 @@ public final class InteractionPlanner {
             BlockPos searchTarget = entity.resolveRuntimeTarget("explore", entity.blockPosition());
             if (searchTarget != null && !entity.runtimeIsWithin(searchTarget, 4.0D)) {
                 return InteractionPlan.of(woodTask ? "搜索树木交互" : "搜索矿点交互", List.of(
+                        InteractionAction.recoverStuck("先尝试脱困"),
                         InteractionAction.equipTool(woodTask, woodTask ? "准备斧头" : "准备镐子"),
                         InteractionAction.moveNear(searchTarget, 1.0D, 2.56D, woodTask ? "搜索附近树木" : "搜索附近矿点"),
                         InteractionAction.adjustView(searchTarget, woodTask ? "抬头观察树冠线索" : "观察地形与矿线"),
@@ -38,6 +39,7 @@ public final class InteractionPlanner {
         }
 
         List<InteractionAction> actions = new ArrayList<>();
+        actions.add(InteractionAction.recoverStuck("先处理当前卡位"));
         actions.add(InteractionAction.equipTool(woodTask, woodTask ? "切换斧头采集" : "切换镐子采集"));
         if (entity.runtimeShouldUseShieldNow()) {
             actions.add(InteractionAction.raiseShield("进入采集前先举盾防御"));
@@ -67,6 +69,7 @@ public final class InteractionPlanner {
             BlockPos searchTarget = entity.resolveRuntimeTarget("explore", entity.blockPosition());
             if (searchTarget != null && !entity.runtimeIsWithin(searchTarget, 4.0D)) {
                 return InteractionPlan.of("建材搜索交互", List.of(
+                        InteractionAction.recoverStuck("先处理卡位后再搜索建材"),
                         InteractionAction.moveNear(searchTarget, 1.0D, 2.56D, "搜索可用建材"),
                         InteractionAction.lookAt(searchTarget, "观察周边可采资源")));
             }
@@ -79,6 +82,7 @@ public final class InteractionPlanner {
         }
 
         List<InteractionAction> actions = new ArrayList<>();
+        actions.add(InteractionAction.recoverStuck("先处理当前卡位"));
         actions.add(InteractionAction.equipTool(true, "切换建造工具"));
         if (entity.runtimeShouldUseShieldNow()) {
             actions.add(InteractionAction.raiseShield("建造前先举盾观察威胁"));

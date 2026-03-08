@@ -2893,7 +2893,7 @@ public class AIPlayerEntity extends Zombie {
                     double selfDistance = this.distanceToSqr(Vec3.atCenterOf(candidate));
                     boolean waterNode = this.level().getFluidState(candidate).is(FluidTags.WATER)
                             || this.level().getFluidState(candidate.above()).is(FluidTags.WATER);
-                    double score = targetDistance * 2.0D + selfDistance + (waterNode ? 2.5D : 0.0D);
+                    double score = targetDistance * 2.0D + selfDistance + (waterNode ? 0.6D : 0.0D);
                     if (score < bestScore) {
                         bestScore = score;
                         bestPos = candidate;
@@ -4026,6 +4026,10 @@ public class AIPlayerEntity extends Zombie {
         return this.navigateToPosition(pos, speed);
     }
 
+    boolean runtimeAttemptImmediateRecovery() {
+        return this.attemptImmediateRecovery();
+    }
+
     void runtimeLookAt(Vec3 target, int ticks) {
         this.setForcedLookTarget(target, ticks);
     }
@@ -4353,7 +4357,8 @@ public class AIPlayerEntity extends Zombie {
         if (expanded != null) {
             return expanded;
         }
-        return this.findNearbyDryStandPosition(pos, 8, 6);
+        BlockPos dryStand = this.findNearbyDryStandPosition(pos, 8, 6);
+        return dryStand != null ? dryStand : pos;
     }
 
     boolean runtimeCanStandAt(BlockPos pos) {
@@ -4455,7 +4460,7 @@ public class AIPlayerEntity extends Zombie {
         double verticalDelta = Math.abs(candidate.getY() - target.getY());
         boolean waterNode = this.level().getFluidState(candidate).is(FluidTags.WATER)
                 || this.level().getFluidState(candidate.above()).is(FluidTags.WATER);
-        return selfDistance + targetDistance * 2.25D + verticalDelta * 0.75D + (waterNode ? 2.5D : 0.0D);
+        return selfDistance + targetDistance * 2.25D + verticalDelta * 0.75D + (waterNode ? 0.8D : 0.0D);
     }
 
     ActionExecutionResult executePlannedAction(PlannedAction action, AgentGoal goal) {
