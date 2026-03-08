@@ -108,9 +108,6 @@ final class CustomNodeEvaluator {
 
     double movementPenalty(BlockPos pos, boolean jumped, PathNodeAction action) {
         double penalty = 1.0D;
-        if (this.isWaterNode(pos)) {
-            penalty += 0.45D;
-        }
         if (jumped) {
             penalty += 0.7D;
         }

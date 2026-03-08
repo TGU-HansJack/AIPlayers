@@ -157,7 +157,17 @@ final class AgentRuntime {
                 yield resolved != null && this.movementController.hasReachedTarget(resolved);
             }
             case ACQUIRE_TOOL -> !state.lowTools();
-            case CHOP_TREE -> action.requiredCount() > 0 && state.buildingUnits() >= action.requiredCount();
+            case CHOP_TREE -> {
+                if (this.currentGoal.type() == GoalType.COLLECT_WOOD) {
+                    yield false;
+                }
+                boolean enoughBuildingUnits = action.requiredCount() > 0 && state.buildingUnits() >= action.requiredCount();
+                if (!enoughBuildingUnits) {
+                    yield false;
+                }
+                BlockPos stillReachableWood = this.entity.runtimeResolveHarvestTarget(true);
+                yield stillReachableWood == null;
+            }
             case MINE_ORE -> false;
             case COLLECT_DROP -> !state.dropNearby();
             case HARVEST_CROP -> !state.lowFood() || !state.cropKnown();

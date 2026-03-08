@@ -72,6 +72,12 @@ public final class InteractionExecutor {
         }
         if (!entity.runtimeNavigateToPosition(target, action.speed())) {
             entity.runtimeRemember("交互", "移动受阻，继续重试：" + action.label());
+            BlockPos resolved = entity.runtimeResolveMovementTarget(target);
+            if (resolved != null) {
+                entity.runtimeNavigateToPosition(resolved, action.speed());
+            } else {
+                entity.runtimeAttemptImmediateRecovery();
+            }
             return ActionExecutionResult.RUNNING;
         }
         return ActionExecutionResult.RUNNING;
@@ -106,9 +112,11 @@ public final class InteractionExecutor {
             BlockPos approach = entity.runtimeFindApproachPosition(target);
             BlockPos moveTarget = approach != null ? approach : entity.runtimeResolveMovementTarget(target);
             if (moveTarget == null) {
+                entity.runtimeAttemptImmediateRecovery();
                 return ActionExecutionResult.RUNNING;
             }
             if (!entity.runtimeNavigateToPosition(moveTarget, action.speed())) {
+                entity.runtimeAttemptImmediateRecovery();
                 return ActionExecutionResult.RUNNING;
             }
             entity.runtimeLookAt(Vec3.atCenterOf(target), 10);
@@ -133,9 +141,11 @@ public final class InteractionExecutor {
             BlockPos approach = entity.runtimeFindApproachPosition(focus);
             BlockPos moveTarget = approach != null ? approach : entity.runtimeResolveMovementTarget(focus);
             if (moveTarget == null) {
+                entity.runtimeAttemptImmediateRecovery();
                 return ActionExecutionResult.RUNNING;
             }
             if (!entity.runtimeNavigateToPosition(moveTarget, action.speed())) {
+                entity.runtimeAttemptImmediateRecovery();
                 return ActionExecutionResult.RUNNING;
             }
             entity.runtimeLookAt(Vec3.atCenterOf(focus), 10);
@@ -158,9 +168,11 @@ public final class InteractionExecutor {
             BlockPos approach = entity.runtimeFindApproachPosition(target);
             BlockPos moveTarget = approach != null ? approach : entity.runtimeResolveMovementTarget(target);
             if (moveTarget == null) {
+                entity.runtimeAttemptImmediateRecovery();
                 return ActionExecutionResult.RUNNING;
             }
             if (!entity.runtimeNavigateToPosition(moveTarget, action.speed())) {
+                entity.runtimeAttemptImmediateRecovery();
                 return ActionExecutionResult.RUNNING;
             }
             entity.runtimeLookAt(Vec3.atCenterOf(target), 10);

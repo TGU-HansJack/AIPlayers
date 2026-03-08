@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.PriorityQueue;
 import net.minecraft.core.Direction;
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.Vec3;
 
 public final class AgentPathPlanner {
@@ -58,6 +59,14 @@ public final class AgentPathPlanner {
         BlockPos resolved = entity.runtimeResolveMovementTarget(target);
         addCandidate(candidates, resolved);
         addCandidate(candidates, target);
+        ServerPlayer owner = entity.getRuntimeOwnerPlayer();
+        if (owner != null && (entity.getMode() == AIPlayerMode.FOLLOW || entity.getMode() == AIPlayerMode.GUARD || entity.getMode() == AIPlayerMode.IDLE)) {
+            addCandidate(candidates, owner.blockPosition());
+            addCandidate(candidates, owner.blockPosition().above());
+            for (Direction direction : Direction.Plane.HORIZONTAL) {
+                addCandidate(candidates, owner.blockPosition().relative(direction));
+            }
+        }
         for (Direction direction : Direction.Plane.HORIZONTAL) {
             for (int step = 1; step <= 4; step++) {
                 BlockPos lateral = target.relative(direction, step);
@@ -159,7 +168,12 @@ public final class AgentPathPlanner {
         }
         double targetOffset = last.distanceToSqr(Vec3.atCenterOf(originalTarget));
         double landingOffset = actualTarget.distSqr(originalTarget);
-        return pathDistance + targetOffset * 2.0D + landingOffset * 3.0D + nodes.size() * 0.35D;
+        double ownerBias = 0.0D;
+        ServerPlayer owner = entity.getRuntimeOwnerPlayer();
+        if (owner != null && (entity.getMode() == AIPlayerMode.FOLLOW || entity.getMode() == AIPlayerMode.GUARD || entity.getMode() == AIPlayerMode.IDLE)) {
+            ownerBias = last.distanceToSqr(owner.position()) * 0.35D;
+        }
+        return pathDistance + targetOffset * 2.0D + landingOffset * 3.0D + nodes.size() * 0.35D + ownerBias;
     }
 
     private static List<PathNode> smooth(AIPlayerEntity entity, List<PathNode> nodes) {
@@ -222,7 +236,7 @@ public final class AgentPathPlanner {
             }
 
             if (fromWater && evaluator.isWaterNode(base) && !evaluator.isLavaNode(base)) {
-                steps.add(new PathStep(base, 1.7D, PathNodeAction.NONE, null, true));
+                steps.add(new PathStep(base, evaluator.movementPenalty(base, false, PathNodeAction.NONE), PathNodeAction.NONE, null, true));
             }
 
             BlockPos feetBlock = base;
@@ -248,11 +262,11 @@ public final class AgentPathPlanner {
             if (evaluator.isWaterNode(base) && !evaluator.isLavaNode(base)) {
                 BlockPos swimUp = base.above();
                 if (evaluator.canStandAt(swimUp, true) && !evaluator.isLavaNode(swimUp)) {
-                    steps.add(new PathStep(swimUp, evaluator.movementPenalty(swimUp, true, PathNodeAction.NONE) + 0.18D, PathNodeAction.NONE, null, true));
+                    steps.add(new PathStep(swimUp, evaluator.movementPenalty(swimUp, true, PathNodeAction.NONE) + 0.06D, PathNodeAction.NONE, null, true));
                 }
                 BlockPos swimDown = base.below();
                 if (evaluator.canStandAt(swimDown, true) && !evaluator.isLavaNode(swimDown)) {
-                    steps.add(new PathStep(swimDown, evaluator.movementPenalty(swimDown, false, PathNodeAction.NONE) + 0.25D, PathNodeAction.NONE, null, false));
+                    steps.add(new PathStep(swimDown, evaluator.movementPenalty(swimDown, false, PathNodeAction.NONE) + 0.08D, PathNodeAction.NONE, null, false));
                 }
             }
         }

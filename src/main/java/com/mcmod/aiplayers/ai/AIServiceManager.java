@@ -12,10 +12,13 @@ import com.mcmod.aiplayers.entity.GoalType;
 import com.mcmod.aiplayers.entity.AIPlayerEntity;
 import com.mcmod.aiplayers.system.AIAgentPlan;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.URI;
+import java.net.SocketTimeoutException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -37,6 +40,14 @@ public final class AIServiceManager {
     private static final String DEFAULT_CHAT_MODEL = "qwen-plus";
     private static final String DEFAULT_PLANNER_MODE = "llm_primary";
     private static final String LEGACY_OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
+    private static final int DEFAULT_TIMEOUT_MS = 45000;
+    private static final int MIN_TIMEOUT_MS = 8000;
+    private static final int MAX_TIMEOUT_MS = 180000;
+    private static final int DEFAULT_MAX_RETRIES = 3;
+    private static final int MAX_RETRIES_LIMIT = 6;
+    private static final int CONVERSATION_MAX_TOKENS = 280;
+    private static final int GOAL_PLAN_MAX_TOKENS = 220;
+    private static final int STATUS_BODY_SNIPPET_LIMIT = 220;
     private static volatile Config config = loadOrCreateConfig();
     private static volatile String lastStatus = "本地规则模式";
 
@@ -91,6 +102,8 @@ public final class AIServiceManager {
         Config next = config.normalize();
         next.enabled = enabled;
         next.conversationEnabled = enabled;
+        next.taskPlanningEnabled = enabled;
+        next.taskAiEnabled = enabled;
         config = next;
         saveConfig(next);
         lastStatus = enabled ? "AI 接口已启用" : "AI 接口已关闭";
@@ -227,7 +240,7 @@ public final class AIServiceManager {
 
     private static HttpClient createClient() {
         return HttpClient.newBuilder()
-                .connectTimeout(Duration.ofMillis(Math.max(3000, Math.min(config.timeoutMs, 12000))))
+                .connectTimeout(Duration.ofMillis(resolveConnectTimeoutMs()))
                 .build();
     }
 
@@ -235,6 +248,8 @@ public final class AIServiceManager {
         JsonObject root = new JsonObject();
         root.addProperty("model", config.conversationModel);
         root.addProperty("temperature", 0.4D);
+        root.addProperty("max_tokens", CONVERSATION_MAX_TOKENS);
+        root.addProperty("stream", false);
         JsonArray messages = new JsonArray();
         JsonObject system = new JsonObject();
         system.addProperty("role", "system");
@@ -252,6 +267,8 @@ public final class AIServiceManager {
         JsonObject root = new JsonObject();
         root.addProperty("model", config.goalModel);
         root.addProperty("temperature", 0.2D);
+        root.addProperty("max_tokens", GOAL_PLAN_MAX_TOKENS);
+        root.addProperty("stream", false);
         JsonArray messages = new JsonArray();
         JsonObject system = new JsonObject();
         system.addProperty("role", "system");
@@ -267,7 +284,7 @@ public final class AIServiceManager {
 
     private static HttpRequest createRequest(JsonObject root) {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(config.url))
-                .timeout(Duration.ofMillis(Math.max(4000, config.timeoutMs)))
+                .timeout(Duration.ofMillis(resolveRequestTimeoutMs()))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(root), StandardCharsets.UTF_8));
         if (config.apiKey != null && !config.apiKey.isBlank()) {
@@ -287,6 +304,14 @@ public final class AIServiceManager {
         client.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
                 .whenComplete((response, throwable) -> {
                     if (throwable == null) {
+                        if (response != null && isRetryableStatus(response.statusCode()) && attempt < maxRetries) {
+                            int nextAttempt = attempt + 1;
+                            lastStatus = scope + "返回可重试状态 HTTP " + response.statusCode() + "，重试 " + nextAttempt + "/" + maxRetries;
+                            long backoffMs = retryDelayMs(nextAttempt);
+                            CompletableFuture.delayedExecutor(backoffMs, TimeUnit.MILLISECONDS)
+                                    .execute(() -> sendAsyncAttempt(client, request, scope, nextAttempt, maxRetries, result));
+                            return;
+                        }
                         result.complete(response);
                         return;
                     }
@@ -309,6 +334,14 @@ public final class AIServiceManager {
         if (throwable == null) {
             return false;
         }
+        if (throwable instanceof HttpTimeoutException
+                || throwable instanceof SocketTimeoutException
+                || throwable instanceof ConnectException) {
+            return true;
+        }
+        if (throwable.getCause() != null && throwable.getCause() != throwable && shouldRetry(throwable.getCause())) {
+            return true;
+        }
         String message = throwable.getMessage() == null ? "" : throwable.getMessage().toLowerCase();
         return message.contains("timeout")
                 || message.contains("timed out")
@@ -321,11 +354,15 @@ public final class AIServiceManager {
         if (throwable == null) {
             return scope + "失败";
         }
-        String message = throwable.getMessage() == null ? "" : throwable.getMessage().toLowerCase();
-        if (message.contains("timeout") || message.contains("timed out")) {
-            return scope + "超时，已回退本地";
+        if (throwable instanceof HttpTimeoutException || throwable instanceof SocketTimeoutException) {
+            return scope + "超时（请求超时 " + resolveRequestTimeoutMs() + "ms），已回退本地";
         }
-        return throwable.getClass().getSimpleName() + ": " + throwable.getMessage();
+        String message = throwable.getMessage();
+        String normalized = message == null ? "" : message.toLowerCase();
+        if (normalized.contains("timeout") || normalized.contains("timed out")) {
+            return scope + "超时（请求超时 " + resolveRequestTimeoutMs() + "ms），已回退本地";
+        }
+        return throwable.getClass().getSimpleName() + ": " + (message == null ? "未知错误" : message);
     }
 
     private static String buildConversationSystemPrompt() {
@@ -380,7 +417,11 @@ public final class AIServiceManager {
 
     private static AIServiceResponse parseConversationHttpResponse(HttpResponse<String> response) {
         if (response == null || response.statusCode() < 200 || response.statusCode() >= 300) {
-            lastStatus = "HTTP " + (response == null ? "null" : response.statusCode());
+            if (response == null) {
+                lastStatus = "对话 HTTP null";
+            } else {
+                lastStatus = "对话 HTTP " + response.statusCode() + "：" + summarizeBody(response.body());
+            }
             return null;
         }
         AIServiceResponse parsed = parseConversationResponse(response.body());
@@ -390,7 +431,11 @@ public final class AIServiceManager {
 
     private static AIGoalPlanResponse parseGoalPlanHttpResponse(HttpResponse<String> response) {
         if (response == null || response.statusCode() < 200 || response.statusCode() >= 300) {
-            lastStatus = "HTTP " + (response == null ? "null" : response.statusCode());
+            if (response == null) {
+                lastStatus = "任务规划 HTTP null";
+            } else {
+                lastStatus = "任务规划 HTTP " + response.statusCode() + "：" + summarizeBody(response.body());
+            }
             return null;
         }
         AIGoalPlanResponse parsed = parseGoalPlanResponse(response.body());
@@ -539,6 +584,42 @@ public final class AIServiceManager {
         return value == null || value.isBlank() ? fallback : value;
     }
 
+    private static int resolveRequestTimeoutMs() {
+        return Math.max(MIN_TIMEOUT_MS, Math.min(config.timeoutMs, MAX_TIMEOUT_MS));
+    }
+
+    private static int resolveConnectTimeoutMs() {
+        int requestTimeout = resolveRequestTimeoutMs();
+        int connect = Math.max(3000, requestTimeout / 2);
+        return Math.min(connect, 30000);
+    }
+
+    private static long retryDelayMs(int attempt) {
+        return Math.min(5000L, 450L * attempt + 300L);
+    }
+
+    private static boolean isRetryableStatus(int statusCode) {
+        return statusCode == 408
+                || statusCode == 409
+                || statusCode == 425
+                || statusCode == 429
+                || statusCode == 500
+                || statusCode == 502
+                || statusCode == 503
+                || statusCode == 504;
+    }
+
+    private static String summarizeBody(String body) {
+        if (body == null || body.isBlank()) {
+            return "";
+        }
+        String compact = body.replace('\n', ' ').replace('\r', ' ').trim();
+        if (compact.length() <= STATUS_BODY_SNIPPET_LIMIT) {
+            return compact;
+        }
+        return compact.substring(0, STATUS_BODY_SNIPPET_LIMIT) + "...";
+    }
+
     private static Config loadOrCreateConfig() {
         try {
             Files.createDirectories(CONFIG_PATH.getParent());
@@ -599,14 +680,14 @@ public final class AIServiceManager {
             config.url = DEFAULT_CHAT_URL;
             config.apiKey = "";
             config.model = DEFAULT_CHAT_MODEL;
-            config.timeoutMs = 15000;
+            config.timeoutMs = DEFAULT_TIMEOUT_MS;
             config.plannerMode = DEFAULT_PLANNER_MODE;
             config.conversationEnabled = false;
             config.taskPlanningEnabled = false;
             config.conversationModel = DEFAULT_CHAT_MODEL;
             config.goalModel = DEFAULT_CHAT_MODEL;
             config.replanIntervalSeconds = 5;
-            config.maxRetries = 2;
+            config.maxRetries = DEFAULT_MAX_RETRIES;
             return config;
         }
 
@@ -624,7 +705,9 @@ public final class AIServiceManager {
                 this.model = DEFAULT_CHAT_MODEL;
             }
             if (this.timeoutMs <= 0) {
-                this.timeoutMs = 15000;
+                this.timeoutMs = DEFAULT_TIMEOUT_MS;
+            } else {
+                this.timeoutMs = Math.max(MIN_TIMEOUT_MS, Math.min(this.timeoutMs, MAX_TIMEOUT_MS));
             }
             if (this.taskAiIntervalSeconds <= 0) {
                 this.taskAiIntervalSeconds = 5;
@@ -641,11 +724,16 @@ public final class AIServiceManager {
             if (this.replanIntervalSeconds <= 0) {
                 this.replanIntervalSeconds = this.taskAiIntervalSeconds > 0 ? this.taskAiIntervalSeconds : 5;
             }
-            if (this.maxRetries <= 0) {
-                this.maxRetries = 2;
+            if (this.maxRetries < 0) {
+                this.maxRetries = DEFAULT_MAX_RETRIES;
+            } else if (this.maxRetries > MAX_RETRIES_LIMIT) {
+                this.maxRetries = MAX_RETRIES_LIMIT;
             }
             if (!this.conversationEnabled && this.enabled) {
                 this.conversationEnabled = true;
+            }
+            if (!this.taskPlanningEnabled && this.enabled) {
+                this.taskPlanningEnabled = true;
             }
             if (!this.taskPlanningEnabled && this.taskAiEnabled) {
                 this.taskPlanningEnabled = true;

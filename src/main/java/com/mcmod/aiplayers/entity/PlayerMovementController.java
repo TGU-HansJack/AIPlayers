@@ -14,6 +14,9 @@ final class PlayerMovementController {
     private static final int PATH_REPLAN_COOLDOWN_TICKS = 20;
     private static final int STUCK_CHECK_INTERVAL_TICKS = 5;
     private static final double STUCK_PROGRESS_THRESHOLD_SQR = 4.0E-4D;
+    private static final double SPIN_PROGRESS_THRESHOLD_SQR = 1.0E-3D;
+    private static final float SPIN_YAW_DELTA_THRESHOLD = 22.0F;
+    private static final int SPIN_TRIGGER_TICKS = 20;
     private static final double ARRIVE_XZ_DISTANCE_SQR = 0.36D;
     private static final double ARRIVE_Y_ABS = 1.0D;
     private static final double WAYPOINT_ADVANCE_XZ_DISTANCE_SQR = 0.49D;
@@ -32,7 +35,12 @@ final class PlayerMovementController {
     private long lastPathRequestTick;
     private long lastStuckCheckTick;
     private long lastNodeActionTick;
+    private long lastRecoveryJumpTick;
+    private Vec3 lastSpinSample = Vec3.ZERO;
+    private float lastSpinYaw;
+    private int spinTicks;
     private static final int NODE_ACTION_COOLDOWN_TICKS = 6;
+    private static final int RECOVERY_JUMP_COOLDOWN_TICKS = 14;
 
     PlayerMovementController(AIPlayerEntity entity) {
         this.entity = entity;
@@ -59,8 +67,10 @@ final class PlayerMovementController {
         if (sameTargetRegion && gameTime - this.lastPathRequestTick < PATH_REPLAN_COOLDOWN_TICKS && this.activePath.isEmpty()) {
             this.targetPos = resolvedTarget.immutable();
             this.speedModifier = speedModifier;
-            this.pathStatus = "路径重算冷却中";
-            return false;
+            this.activePath = List.of(PathNode.move(Vec3.atCenterOf(this.targetPos)));
+            this.pathIndex = 0;
+            this.pathStatus = "路径重算冷却中，先直控逼近";
+            return true;
         }
 
         this.targetPos = resolvedTarget.immutable();
@@ -72,16 +82,25 @@ final class PlayerMovementController {
             return true;
         }
 
-        this.activePath = budgetGranted
+        List<PathNode> planned = budgetGranted
                 ? AgentPathPlanner.plan(this.entity, this.targetPos)
-                : List.of(new PathNode(Vec3.atCenterOf(this.targetPos)));
+                : List.of(PathNode.move(Vec3.atCenterOf(this.targetPos)));
+        if (planned.isEmpty()) {
+            planned = List.of(PathNode.move(Vec3.atCenterOf(this.targetPos)));
+            this.pathStatus = budgetGranted ? "路径缺失，切换直控逼近" : "预算忙，先直控逼近";
+        } else {
+            this.pathStatus = describeFreshPath(budgetGranted);
+        }
+        this.activePath = planned;
         this.pathIndex = 0;
-        this.pathStatus = describeFreshPath(budgetGranted);
         this.lastSample = this.entity.position();
+        this.lastSpinSample = this.entity.position();
+        this.lastSpinYaw = this.entity.getYRot();
+        this.spinTicks = 0;
         this.stuckTicks = 0;
         this.lastReplanTick = gameTime;
         this.lastStuckCheckTick = gameTime;
-        return !this.activePath.isEmpty();
+        return true;
     }
 
     void clear() {
@@ -90,8 +109,12 @@ final class PlayerMovementController {
         this.pathIndex = 0;
         this.pathStatus = "空闲";
         this.stuckTicks = 0;
+        this.spinTicks = 0;
         this.lastStuckCheckTick = 0L;
         this.lastNodeActionTick = 0L;
+        this.lastRecoveryJumpTick = 0L;
+        this.lastSpinSample = Vec3.ZERO;
+        this.lastSpinYaw = 0.0F;
         this.entity.runtimeClearWasdOverride();
         this.entity.setZza(0.0F);
         this.entity.setXxa(0.0F);
@@ -200,8 +223,12 @@ final class PlayerMovementController {
         this.targetPos = null;
         this.pathIndex = 0;
         this.stuckTicks = 0;
+        this.spinTicks = 0;
         this.lastStuckCheckTick = 0L;
         this.lastNodeActionTick = 0L;
+        this.lastRecoveryJumpTick = 0L;
+        this.lastSpinSample = Vec3.ZERO;
+        this.lastSpinYaw = 0.0F;
         this.entity.runtimeClearWasdOverride();
         this.entity.setZza(0.0F);
         this.entity.setXxa(0.0F);
@@ -270,6 +297,23 @@ final class PlayerMovementController {
         }
         this.lastStuckCheckTick = gameTime;
         Vec3 current = this.entity.position();
+        if (this.lastSpinSample == Vec3.ZERO) {
+            this.lastSpinSample = current;
+            this.lastSpinYaw = this.entity.getYRot();
+        } else {
+            float yawDelta = Math.abs(Mth.wrapDegrees(this.entity.getYRot() - this.lastSpinYaw));
+            double moved = current.distanceToSqr(this.lastSpinSample);
+            if (moved < SPIN_PROGRESS_THRESHOLD_SQR && yawDelta > SPIN_YAW_DELTA_THRESHOLD) {
+                this.spinTicks += STUCK_CHECK_INTERVAL_TICKS;
+            } else {
+                this.spinTicks = Math.max(0, this.spinTicks - STUCK_CHECK_INTERVAL_TICKS);
+            }
+            this.lastSpinSample = current;
+            this.lastSpinYaw = this.entity.getYRot();
+            if (this.spinTicks >= SPIN_TRIGGER_TICKS) {
+                this.handleSpinRecovery(gameTime);
+            }
+        }
         if (current.distanceToSqr(this.lastSample) < STUCK_PROGRESS_THRESHOLD_SQR) {
             this.stuckTicks += STUCK_CHECK_INTERVAL_TICKS;
         } else {
@@ -281,16 +325,21 @@ final class PlayerMovementController {
         }
 
         this.pathStatus = "局部避障中";
-        if (this.entity.onGround()) {
+        boolean climbNeeded = waypoint != null && waypoint.y > this.entity.getY() + 0.45D;
+        if (this.entity.onGround()
+                && !this.entity.runtimeHasLowCeiling()
+                && (this.entity.horizontalCollision || climbNeeded)
+                && gameTime - this.lastRecoveryJumpTick >= RECOVERY_JUMP_COOLDOWN_TICKS) {
             this.entity.getJumpControl().jump();
+            this.lastRecoveryJumpTick = gameTime;
         }
         float yaw = this.entity.getYRot() * ((float) Math.PI / 180.0F);
-        double side = (this.stuckTicks / LOCAL_RECOVERY_TICKS) % 2 == 0 ? 0.65D : -0.65D;
+        double side = (this.stuckTicks / LOCAL_RECOVERY_TICKS) % 2 == 0 ? 0.55D : -0.55D;
         double offsetX = Mth.cos(yaw) * side;
         double offsetZ = -Mth.sin(yaw) * side;
         Vec3 sidestep = this.entity.position().add(offsetX, 0.0D, offsetZ);
         float sidestepYaw = (float) (Mth.atan2(offsetZ, offsetX) * (180.0F / (float) Math.PI)) - 90.0F;
-        this.entity.runtimeSetWasdControl(0.72F, side > 0 ? 0.35F : -0.35F, 0.085F, sidestepYaw, false, this.entity.onGround());
+        this.entity.runtimeSetWasdControl(0.62F, side > 0 ? 0.28F : -0.28F, 0.078F, sidestepYaw, false, false);
 
         if (this.stuckTicks >= LOCAL_REPOSITION_TICKS && this.targetPos != null) {
             BlockPos localStandPos = this.entity.runtimeResolveMovementTarget(this.targetPos);
@@ -379,11 +428,11 @@ final class PlayerMovementController {
         float forward = Mth.clamp(Mth.cos(radians), 0.0F, 1.0F);
         float strafe = Mth.clamp(-Mth.sin(radians), -0.55F, 0.55F);
         float absYawDelta = Math.abs(yawDelta);
-        if (absYawDelta > 135.0F) {
-            forward = 0.28F;
+        if (absYawDelta > 120.0F) {
+            forward = 0.0F;
             strafe = 0.0F;
-        } else if (absYawDelta > 95.0F) {
-            forward = Math.max(0.44F, forward * 0.72F);
+        } else if (absYawDelta > 90.0F) {
+            forward = Math.max(0.34F, forward * 0.62F);
             strafe = 0.0F;
         } else if (absYawDelta > 60.0F) {
             forward = Math.max(0.62F, forward * 0.88F);
@@ -403,6 +452,9 @@ final class PlayerMovementController {
                 && !this.entity.isInLava();
         boolean shouldJump = (jump && this.entity.onGround() && (waypoint.y - current.y > 0.2D || this.entity.horizontalCollision))
                 || (waypoint.y - current.y > 0.52D && this.entity.onGround());
+        if (this.entity.runtimeHasLowCeiling()) {
+            shouldJump = false;
+        }
         if (this.entity.isInWater() || this.entity.isUnderWater()) {
             boolean needsAscend = this.entity.isUnderWater()
                     || this.entity.horizontalCollision
@@ -431,6 +483,26 @@ final class PlayerMovementController {
         boolean shouldJump = this.entity.horizontalCollision || fallback.y - this.entity.getY() > 0.48D;
         applyWasdToward(fallback, speedHint, shouldJump);
         this.pathStatus = "路径空闲兜底：直控逼近目标";
+    }
+
+    private void handleSpinRecovery(long gameTime) {
+        this.spinTicks = 0;
+        if (this.targetPos == null) {
+            return;
+        }
+        BlockPos resolved = this.entity.runtimeResolveMovementTarget(this.targetPos);
+        if (resolved != null) {
+            this.targetPos = resolved;
+            this.activePath = List.of(PathNode.move(Vec3.atCenterOf(resolved)));
+            this.pathIndex = 0;
+            this.pathStatus = "检测到原地转圈，重置为局部直控路径";
+        } else {
+            this.activePath = List.of();
+            this.pathStatus = "检测到原地转圈，等待重算路径";
+        }
+        this.stuckTicks = Math.max(this.stuckTicks, LOCAL_RECOVERY_TICKS);
+        this.lastSample = this.entity.position();
+        this.lastReplanTick = gameTime - REPLAN_BACKOFF_TICKS;
     }
 
     private boolean isNearWaypoint(Vec3 waypoint, double maxXzDistanceSqr, double maxYAbs) {

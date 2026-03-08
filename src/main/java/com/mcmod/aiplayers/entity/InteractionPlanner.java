@@ -27,7 +27,7 @@ public final class InteractionPlanner {
         BlockPos target = entity.runtimeResolveHarvestTarget(woodTask);
         if (target == null) {
             BlockPos searchTarget = entity.resolveRuntimeTarget("explore", entity.blockPosition());
-            if (searchTarget != null && !entity.runtimeIsWithin(searchTarget, 4.0D)) {
+            if (searchTarget != null && !entity.runtimeIsWithin(searchTarget, 2.56D)) {
                 return InteractionPlan.of(woodTask ? "搜索树木交互" : "搜索矿点交互", List.of(
                         InteractionAction.recoverStuck("先尝试脱困"),
                         InteractionAction.equipTool(woodTask, woodTask ? "准备斧头" : "准备镐子"),
@@ -48,7 +48,7 @@ public final class InteractionPlanner {
         BlockPos focus = obstacle != null ? obstacle : target;
         BlockPos approach = entity.runtimeFindApproachPosition(focus);
         BlockPos moveTarget = approach != null ? approach : entity.runtimeResolveMovementTarget(focus);
-        if (moveTarget != null && !entity.runtimeIsWithin(moveTarget, 4.0D)) {
+        if (moveTarget != null && !entity.runtimeIsWithin(moveTarget, 2.56D)) {
             actions.add(InteractionAction.moveNear(moveTarget, 1.05D, 2.56D, obstacle != null ? "靠近障碍并准备清障" : "靠近资源准备交互"));
         }
         actions.add(InteractionAction.adjustView(focus, obstacle != null ? "调整视角以清障" : "调整视角锁定资源"));
@@ -67,7 +67,7 @@ public final class InteractionPlanner {
     private static InteractionPlan buildShelterPlan(AIPlayerEntity entity) {
         if (!entity.runtimeHasBuildingMaterials()) {
             BlockPos searchTarget = entity.resolveRuntimeTarget("explore", entity.blockPosition());
-            if (searchTarget != null && !entity.runtimeIsWithin(searchTarget, 4.0D)) {
+            if (searchTarget != null && !entity.runtimeIsWithin(searchTarget, 2.56D)) {
                 return InteractionPlan.of("建材搜索交互", List.of(
                         InteractionAction.recoverStuck("先处理卡位后再搜索建材"),
                         InteractionAction.moveNear(searchTarget, 1.0D, 2.56D, "搜索可用建材"),
@@ -94,7 +94,7 @@ public final class InteractionPlanner {
         BlockPos focus = obstacle != null ? obstacle : placement;
         BlockPos approach = entity.runtimeFindApproachPosition(focus);
         BlockPos moveTarget = approach != null ? approach : entity.runtimeResolveMovementTarget(focus);
-        if (moveTarget != null && !entity.runtimeIsWithin(moveTarget, 4.0D)) {
+        if (moveTarget != null && !entity.runtimeIsWithin(moveTarget, 2.56D)) {
             actions.add(InteractionAction.moveNear(moveTarget, 1.0D, 2.56D, obstacle != null ? "靠近建造阻挡并准备清障" : "靠近建造点"));
         }
         actions.add(InteractionAction.adjustView(focus, obstacle != null ? "抬头检查建造阻挡" : "抬头对准建造点"));

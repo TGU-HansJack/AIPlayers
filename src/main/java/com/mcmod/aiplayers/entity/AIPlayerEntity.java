@@ -13,12 +13,15 @@ import com.mcmod.aiplayers.system.BlueprintRegistry;
 import com.mcmod.aiplayers.system.BlueprintTemplate;
 import com.mcmod.aiplayers.system.ChatIntent;
 import com.mcmod.aiplayers.system.ChatIntentParser;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
@@ -1186,17 +1189,7 @@ public class AIPlayerEntity extends Zombie {
             return;
         }
 
-        BlockPos target = woodTask ? this.rememberedLog : this.rememberedOre;
-        if (!this.isValidHarvestTarget(target, woodTask)) {
-            target = this.findNearestHarvestBlock(woodTask);
-            if (woodTask) {
-                this.rememberedLog = target;
-            } else {
-                this.rememberedOre = target;
-            }
-        }
-
-        target = this.normalizeHarvestTarget(target, woodTask);
+        BlockPos target = this.resolveHarvestTarget(woodTask, woodTask ? this.rememberedLog : this.rememberedOre);
         if (woodTask) {
             this.rememberedLog = target;
         } else {
@@ -2275,11 +2268,67 @@ public class AIPlayerEntity extends Zombie {
     }
 
     private BlockPos findConnectedHarvestTarget(BlockPos origin, boolean woodTask) {
+        if (origin == null) {
+            return null;
+        }
+        if (woodTask) {
+            BlockPos base = this.normalizeHarvestTarget(origin, true);
+            ArrayDeque<BlockPos> frontier = new ArrayDeque<>();
+            Set<BlockPos> visited = new HashSet<>();
+            frontier.add(base);
+            visited.add(base);
+
+            BlockPos bestPos = null;
+            double bestScore = Double.MAX_VALUE;
+            int expanded = 0;
+            while (!frontier.isEmpty() && expanded < 96) {
+                BlockPos current = frontier.poll();
+                expanded++;
+                for (Direction direction : Direction.values()) {
+                    BlockPos candidate = current.relative(direction);
+                    if (Math.abs(candidate.getX() - base.getX()) > 3
+                            || Math.abs(candidate.getY() - base.getY()) > 8
+                            || Math.abs(candidate.getZ() - base.getZ()) > 3) {
+                        continue;
+                    }
+                    if (!visited.add(candidate)) {
+                        continue;
+                    }
+                    if (!this.level().getBlockState(candidate).is(BlockTags.LOGS)) {
+                        continue;
+                    }
+                    frontier.add(candidate);
+                    if (candidate.equals(base)) {
+                        continue;
+                    }
+                    if (!this.isHarvestTargetReachable(candidate, true)) {
+                        continue;
+                    }
+
+                    double score = base.distSqr(candidate) + this.distanceToSqr(Vec3.atCenterOf(candidate));
+                    if (candidate.getY() > base.getY()) {
+                        score -= 0.8D * (candidate.getY() - base.getY());
+                    }
+                    if (this.canHarvestFromHere(candidate)) {
+                        score -= 0.6D;
+                    }
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestPos = candidate.immutable();
+                    }
+                }
+            }
+            if (bestPos != null) {
+                return bestPos;
+            }
+            return this.resolveHarvestTarget(true, this.findNearestHarvestBlock(true));
+        }
+
         BlockPos bestPos = null;
         double bestScore = Double.MAX_VALUE;
 
         for (int x = -1; x <= 1; x++) {
-            for (int y = woodTask ? 0 : -1; y <= (woodTask ? 2 : 1); y++) {
+            for (int y = -1; y <= 1; y++) {
                 for (int z = -1; z <= 1; z++) {
                     if (x == 0 && y == 0 && z == 0) {
                         continue;
@@ -2290,9 +2339,6 @@ public class AIPlayerEntity extends Zombie {
                     }
 
                     double score = origin.distSqr(candidate) + this.distanceToSqr(Vec3.atCenterOf(candidate));
-                    if (woodTask && candidate.getY() > origin.getY()) {
-                        score -= 0.75D;
-                    }
                     if (score < bestScore) {
                         bestScore = score;
                         bestPos = candidate;
@@ -2751,6 +2797,33 @@ public class AIPlayerEntity extends Zombie {
         return best;
     }
 
+    private BlockPos resolveHarvestTarget(boolean woodTask, BlockPos seed) {
+        BlockPos preferred = this.normalizeHarvestTarget(seed, woodTask);
+        if (this.isHarvestTargetReachable(preferred, woodTask)) {
+            return preferred;
+        }
+        BlockPos scanned = this.normalizeHarvestTarget(this.findNearestHarvestBlock(woodTask), woodTask);
+        if (this.isHarvestTargetReachable(scanned, woodTask)) {
+            return scanned;
+        }
+        return scanned != null ? scanned : preferred;
+    }
+
+    private boolean isHarvestTargetReachable(BlockPos target, boolean woodTask) {
+        if (!this.isValidHarvestTarget(target, woodTask)) {
+            return false;
+        }
+        if (this.canHarvestFromHere(target)) {
+            return true;
+        }
+        BlockPos obstacle = this.findHarvestObstacle(target, woodTask);
+        BlockPos focus = obstacle != null ? obstacle : target;
+        if (this.findApproachPosition(focus) != null) {
+            return true;
+        }
+        return this.findWalkablePositionNear(focus, 2, 3, true) != null;
+    }
+
     private BlockPos findNearestHarvestBlock(boolean woodTask) {
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
         BlockPos bestPos = null;
@@ -2891,9 +2964,7 @@ public class AIPlayerEntity extends Zombie {
 
                     double targetDistance = candidate.distSqr(center);
                     double selfDistance = this.distanceToSqr(Vec3.atCenterOf(candidate));
-                    boolean waterNode = this.level().getFluidState(candidate).is(FluidTags.WATER)
-                            || this.level().getFluidState(candidate.above()).is(FluidTags.WATER);
-                    double score = targetDistance * 2.0D + selfDistance + (waterNode ? 0.6D : 0.0D);
+                    double score = targetDistance * 2.0D + selfDistance;
                     if (score < bestScore) {
                         bestScore = score;
                         bestPos = candidate;
@@ -4039,16 +4110,7 @@ public class AIPlayerEntity extends Zombie {
     }
 
     BlockPos runtimeResolveHarvestTarget(boolean woodTask) {
-        BlockPos target = woodTask ? this.rememberedLog : this.rememberedOre;
-        if (!this.isValidHarvestTarget(target, woodTask)) {
-            target = this.findNearestHarvestBlock(woodTask);
-            if (woodTask) {
-                this.rememberedLog = target;
-            } else {
-                this.rememberedOre = target;
-            }
-        }
-        target = this.normalizeHarvestTarget(target, woodTask);
+        BlockPos target = this.resolveHarvestTarget(woodTask, woodTask ? this.rememberedLog : this.rememberedOre);
         if (woodTask) {
             this.rememberedLog = target;
         } else {
@@ -4272,6 +4334,10 @@ public class AIPlayerEntity extends Zombie {
         if (jump && !previousJump) {
             this.pendingWasdJumpQueued = true;
         }
+        if (Math.abs(this.pendingWasdForward) > 0.2F || Math.abs(this.pendingWasdStrafe) > 0.12F) {
+            this.forcedLookTarget = null;
+            this.lookTicks = 0;
+        }
         this.wasdOverrideActive = true;
     }
 
@@ -4338,7 +4404,7 @@ public class AIPlayerEntity extends Zombie {
         this.markPersistentDirty();
     }
 
-    BlockPos runtimeResolveMovementTarget(BlockPos pos) {
+    public BlockPos runtimeResolveMovementTarget(BlockPos pos) {
         if (pos == null) {
             return null;
         }
@@ -4367,6 +4433,16 @@ public class AIPlayerEntity extends Zombie {
 
     boolean runtimeCanStandAt(BlockPos pos, boolean allowWater) {
         return this.canStandAt(pos, allowWater);
+    }
+
+    boolean runtimeHasLowCeiling() {
+        BlockPos head = this.blockPosition().above();
+        BlockPos top = head.above();
+        BlockState headState = this.level().getBlockState(head);
+        BlockState topState = this.level().getBlockState(top);
+        boolean headBlocked = !headState.getCollisionShape(this.level(), head).isEmpty();
+        boolean topBlocked = !topState.getCollisionShape(this.level(), top).isEmpty();
+        return headBlocked || topBlocked;
     }
 
     BlockPos runtimeFindNearbyDryStandPosition(BlockPos center, int horizontalRadius, int verticalRadius) {
@@ -4458,9 +4534,7 @@ public class AIPlayerEntity extends Zombie {
         double selfDistance = this.distanceToSqr(Vec3.atCenterOf(candidate));
         double targetDistance = candidate.distSqr(target);
         double verticalDelta = Math.abs(candidate.getY() - target.getY());
-        boolean waterNode = this.level().getFluidState(candidate).is(FluidTags.WATER)
-                || this.level().getFluidState(candidate.above()).is(FluidTags.WATER);
-        return selfDistance + targetDistance * 2.25D + verticalDelta * 0.75D + (waterNode ? 0.8D : 0.0D);
+        return selfDistance + targetDistance * 2.25D + verticalDelta * 0.75D;
     }
 
     ActionExecutionResult executePlannedAction(PlannedAction action, AgentGoal goal) {
@@ -4475,8 +4549,18 @@ public class AIPlayerEntity extends Zombie {
                     this.reportTaskFailure(this.activeTaskName, "无法解析动作目标：" + action.label());
                     return ActionExecutionResult.FAILED;
                 }
-                this.navigateToPosition(target, action.speed());
-                return this.distanceToSqr(Vec3.atCenterOf(target)) <= 4.0D ? ActionExecutionResult.SUCCESS : ActionExecutionResult.RUNNING;
+                BlockPos moveTarget = this.runtimeResolveMovementTarget(target);
+                if (moveTarget == null) {
+                    this.reportTaskFailure(this.activeTaskName, "无法解析可到达站位点：" + this.describePlanTarget(target, action.label()));
+                    return ActionExecutionResult.FAILED;
+                }
+                boolean started = this.navigateToPosition(moveTarget, action.speed());
+                if (!started && !this.runtimeIsWithin(moveTarget, 2.56D)) {
+                    this.attemptImmediateRecovery();
+                    return ActionExecutionResult.RUNNING;
+                }
+                boolean reached = this.agentRuntime.movementController().hasReachedTarget(moveTarget) || this.runtimeIsWithin(moveTarget, 2.56D);
+                return reached ? ActionExecutionResult.SUCCESS : ActionExecutionResult.RUNNING;
             }
             case COLLECT_DROP -> {
                 return this.autoCollectNearbyDrops() ? ActionExecutionResult.SUCCESS : ActionExecutionResult.RUNNING;
