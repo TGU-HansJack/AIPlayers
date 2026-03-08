@@ -17,6 +17,7 @@ public final class MindcraftSidecarManager {
     private static final Object LOCK = new Object();
     private static volatile Process managedProcess;
     private static volatile String lastLogLine = "";
+    private static volatile String lastHealthError = "";
 
     private MindcraftSidecarManager() {
     }
@@ -69,8 +70,10 @@ public final class MindcraftSidecarManager {
     private static boolean isHealthy() {
         try {
             MindcraftBridgeClient.HealthResponse response = MindcraftBridgeClient.health();
+            lastHealthError = "";
             return response != null && response.ok;
-        } catch (Exception ignored) {
+        } catch (Exception exception) {
+            lastHealthError = exception.getClass().getSimpleName() + ": " + exception.getMessage();
             return false;
         }
     }
@@ -89,6 +92,9 @@ public final class MindcraftSidecarManager {
         }
         Path dataRoot = resolveDataRoot(server);
         Files.createDirectories(dataRoot.resolve("bots"));
+
+        lastLogLine = "";
+        lastHealthError = "";
 
         ProcessBuilder builder = new ProcessBuilder(config.nodePath(), "main.js");
         builder.directory(runtimeDir.toFile());
@@ -123,7 +129,8 @@ public final class MindcraftSidecarManager {
             }
             Thread.sleep(500L);
         }
-        throw new IOException("Mindcraft sidecar failed to start. Last log: " + lastLogLine);
+        String detail = lastHealthError == null || lastHealthError.isBlank() ? lastLogLine : lastHealthError + " | last log: " + lastLogLine;
+        throw new IOException("Mindcraft sidecar failed to start. " + detail);
     }
 
     private static String buildSettingsJson(MindcraftConfigManager.Config config) {

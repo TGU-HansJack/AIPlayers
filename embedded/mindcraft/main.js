@@ -3,6 +3,7 @@ import settings from './settings.js';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { readFileSync } from 'fs';
+import { readJsonFile } from './src/utils/json.js';
 
 function parseArguments() {
     return yargs(hideBin(process.argv))
@@ -27,7 +28,7 @@ if (args.profiles) {
     settings.profiles = args.profiles;
 }
 if (args.task_path) {
-    let tasks = JSON.parse(readFileSync(args.task_path, 'utf8'));
+    let tasks = readJsonFile(args.task_path);
     if (args.task_id) {
         settings.task = tasks[args.task_id];
         settings.task.task_id = args.task_id;
@@ -66,7 +67,7 @@ if (process.env.LOG_ALL) {
 Mindcraft.init(true, settings.mindserver_port, settings.auto_open_ui);
 
 for (let profile of settings.profiles) {
-    const profile_json = JSON.parse(readFileSync(profile, 'utf8'));
+    const profile_json = readJsonFile(profile);
     settings.profile = profile_json;
     Mindcraft.createAgent(settings);
 }

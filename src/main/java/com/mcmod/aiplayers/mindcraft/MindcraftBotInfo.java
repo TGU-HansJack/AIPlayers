@@ -14,7 +14,7 @@ public final class MindcraftBotInfo {
     public String lastOutput = "";
     public String lastError = "";
     public int mindserverPort;
-    public JsonObject state;
+    public JsonElement state;
 
     public String displayStatus() {
         if (this.inGame) {
@@ -28,23 +28,25 @@ public final class MindcraftBotInfo {
     }
 
     public String gameplaySummary() {
-        if (this.state == null) {
+        JsonObject stateObject = stateObject();
+        if (stateObject == null) {
             return "状态未知";
         }
-        double x = readDouble(this.state, "gameplay", "position", "x");
-        double y = readDouble(this.state, "gameplay", "position", "y");
-        double z = readDouble(this.state, "gameplay", "position", "z");
-        double health = readDouble(this.state, "gameplay", "health");
-        double hunger = readDouble(this.state, "gameplay", "hunger");
-        String biome = readString(this.state, "gameplay", "biome");
+        double x = readDouble(stateObject, "gameplay", "position", "x");
+        double y = readDouble(stateObject, "gameplay", "position", "y");
+        double z = readDouble(stateObject, "gameplay", "position", "z");
+        double health = readDouble(stateObject, "gameplay", "health");
+        double hunger = readDouble(stateObject, "gameplay", "hunger");
+        String biome = readString(stateObject, "gameplay", "biome");
         return String.format(Locale.ROOT, "血量 %.0f | 饥饿 %.0f | 坐标 %.1f %.1f %.1f | 群系 %s", health, hunger, x, y, z, biome);
     }
 
     public String actionSummary() {
-        if (this.state == null) {
+        JsonObject stateObject = stateObject();
+        if (stateObject == null) {
             return "动作未知";
         }
-        String current = readString(this.state, "action", "current");
+        String current = readString(stateObject, "action", "current");
         return current == null || current.isBlank() ? "动作未知" : current;
     }
 
@@ -53,7 +55,14 @@ public final class MindcraftBotInfo {
     }
 
     public String stateJson() {
-        return this.state == null ? "" : this.state.toString();
+        return this.state == null || this.state.isJsonNull() ? "" : this.state.toString();
+    }
+
+    private JsonObject stateObject() {
+        if (this.state == null || this.state.isJsonNull() || !this.state.isJsonObject()) {
+            return null;
+        }
+        return this.state.getAsJsonObject();
     }
 
     private static String readString(JsonObject root, String... path) {

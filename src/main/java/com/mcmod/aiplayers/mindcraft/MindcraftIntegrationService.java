@@ -22,7 +22,36 @@ public final class MindcraftIntegrationService {
         request.host = MindcraftConfigManager.getConfig().host();
         request.port = port;
         request.profilePath = MindcraftConfigManager.getConfig().defaultProfile();
-        MindcraftBotInfo created = MindcraftBridgeClient.createBot(request);
+
+        MindcraftBotInfo created;
+        try {
+            created = MindcraftBridgeClient.createBot(request);
+        } catch (IOException ex) {
+            if (!isAgentAlreadyExists(ex)) {
+                throw ex;
+            }
+            MindcraftBotInfo existing = resolveExistingBot(botName);
+            if (existing == null) {
+                throw ex;
+            }
+            ensureOwnerCompatible(existing, owner, botName);
+            if (existing.inGame || existing.socketConnected) {
+                created = existing;
+            } else {
+                MindcraftBridgeClient.removeBot(existing.name == null || existing.name.isBlank() ? botName : existing.name);
+                Thread.sleep(350L);
+                created = MindcraftBridgeClient.createBot(request);
+            }
+        }
+
+        created = awaitCreatedBot(botName, created);
+        if (created.ownerUuid == null || created.ownerUuid.isBlank() || created.ownerName == null || created.ownerName.isBlank()) {
+            MindcraftBridgeClient.bindOwner(created.name, owner.getName().getString(), owner.getUUID().toString());
+            MindcraftBotInfo rebound = MindcraftBridgeClient.getBot(created.name);
+            if (rebound != null) {
+                created = rebound;
+            }
+        }
         MindcraftSessionSavedData.get(server).upsert(created, owner.getUUID(), owner.getName().getString());
         return created;
     }
@@ -109,5 +138,52 @@ public final class MindcraftIntegrationService {
 
     private static int resolveJoinPort(MinecraftServer server) {
         return server == null ? -1 : server.getPort();
+    }
+
+    private static MindcraftBotInfo awaitCreatedBot(String botName, MindcraftBotInfo created) throws IOException, InterruptedException {
+        if (created != null && created.name != null && !created.name.isBlank()) {
+            return created;
+        }
+        for (int attempt = 0; attempt < 10; attempt++) {
+            MindcraftBotInfo resolved = MindcraftBridgeClient.getBot(botName);
+            if (resolved != null && resolved.name != null && !resolved.name.isBlank()) {
+                return resolved;
+            }
+            for (MindcraftBotInfo candidate : MindcraftBridgeClient.listBots()) {
+                if (candidate != null && candidate.name != null && candidate.name.equalsIgnoreCase(botName)) {
+                    return candidate;
+                }
+            }
+            Thread.sleep(300L);
+        }
+        throw new IOException("Mindcraft sidecar 未返回 bot 详情：" + botName);
+    }
+
+    private static MindcraftBotInfo resolveExistingBot(String botName) throws IOException, InterruptedException {
+        MindcraftBotInfo resolved = MindcraftBridgeClient.getBot(botName);
+        if (resolved != null && resolved.name != null && !resolved.name.isBlank()) {
+            return resolved;
+        }
+        for (MindcraftBotInfo candidate : MindcraftBridgeClient.listBots()) {
+            if (candidate != null && candidate.name != null && candidate.name.equalsIgnoreCase(botName)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static void ensureOwnerCompatible(MindcraftBotInfo existing, ServerPlayer owner, String botName) throws IOException {
+        if (existing.ownerUuid != null && !existing.ownerUuid.isBlank() && !existing.ownerUuid.equals(owner.getUUID().toString())) {
+            String ownerName = existing.ownerName == null || existing.ownerName.isBlank() ? existing.ownerUuid : existing.ownerName;
+            throw new IOException("bot 已存在且绑定给其他玩家：" + botName + " -> " + ownerName);
+        }
+    }
+
+    private static boolean isAgentAlreadyExists(IOException ex) {
+        if (ex == null || ex.getMessage() == null) {
+            return false;
+        }
+        String message = ex.getMessage();
+        return message.contains("HTTP 409") && message.contains("Agent already exists");
     }
 }

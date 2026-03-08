@@ -1,5 +1,6 @@
 package com.mcmod.aiplayers.system;
 
+import com.mcmod.aiplayers.AIPlayersMod;
 import com.mcmod.aiplayers.mindcraft.MindcraftBotInfo;
 import com.mcmod.aiplayers.mindcraft.MindcraftIntegrationService;
 import com.mcmod.aiplayers.mindcraft.MindcraftSessionSavedData;
@@ -59,8 +60,14 @@ public final class AIPlayersCommands {
             MindcraftBotInfo created = MindcraftIntegrationService.spawnBot(player, name);
             context.getSource().sendSuccess(() -> Component.literal("已创建真实玩家 bot：" + created.compactSummary()), true);
             return 1;
-        } catch (IOException | InterruptedException ex) {
-            context.getSource().sendFailure(Component.literal("创建 bot 失败：" + ex.getMessage()));
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            AIPlayersMod.LOGGER.error("Spawn bot interrupted for {}", name, ex);
+            context.getSource().sendFailure(Component.literal("创建 bot 失败：" + describeException(ex)));
+            return 0;
+        } catch (Exception ex) {
+            AIPlayersMod.LOGGER.error("Spawn bot failed for {}", name, ex);
+            context.getSource().sendFailure(Component.literal("创建 bot 失败：" + describeException(ex)));
             return 0;
         }
     }
@@ -76,18 +83,27 @@ public final class AIPlayersCommands {
                 context.getSource().sendSuccess(() -> Component.literal(bot.compactSummary()), false);
             }
             return bots.size();
-        } catch (IOException | InterruptedException ex) {
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            AIPlayersMod.LOGGER.error("List bots interrupted", ex);
+            context.getSource().sendFailure(Component.literal("无法连接本地面板：" + describeException(ex)));
+            return 0;
+        } catch (IOException ex) {
             int shown = 0;
             for (MindcraftSessionSavedData.MindcraftBotSession session : MindcraftIntegrationService.listStoredSessions(context.getSource().getServer())) {
                 shown++;
                 context.getSource().sendSuccess(() -> Component.literal(session.name() + " | " + session.status() + " | 主人=" + session.ownerName()), false);
             }
             if (shown == 0) {
-                context.getSource().sendFailure(Component.literal("无法连接本地面板：" + ex.getMessage()));
+                context.getSource().sendFailure(Component.literal("无法连接本地面板：" + describeException(ex)));
                 return 0;
             }
             context.getSource().sendSuccess(() -> Component.literal("本地面板不可达，以下为本地缓存会话："), false);
             return shown;
+        } catch (Exception ex) {
+            AIPlayersMod.LOGGER.error("List bots failed", ex);
+            context.getSource().sendFailure(Component.literal("列出 bot 失败：" + describeException(ex)));
+            return 0;
         }
     }
 
@@ -104,8 +120,14 @@ public final class AIPlayersCommands {
             context.getSource().sendSuccess(() -> Component.literal("动作：" + info.actionSummary()), false);
             context.getSource().sendSuccess(() -> Component.literal("最近回复：" + info.lastMessage()), false);
             return 1;
-        } catch (IOException | InterruptedException ex) {
-            context.getSource().sendFailure(Component.literal("查询状态失败：" + ex.getMessage()));
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            AIPlayersMod.LOGGER.error("Status bot interrupted for {}", name, ex);
+            context.getSource().sendFailure(Component.literal("查询状态失败：" + describeException(ex)));
+            return 0;
+        } catch (Exception ex) {
+            AIPlayersMod.LOGGER.error("Status bot failed for {}", name, ex);
+            context.getSource().sendFailure(Component.literal("查询状态失败：" + describeException(ex)));
             return 0;
         }
     }
@@ -118,8 +140,14 @@ public final class AIPlayersCommands {
             MindcraftIntegrationService.sendMessage(player, name, message);
             context.getSource().sendSuccess(() -> Component.literal("已发送到 " + name + "：" + message), false);
             return 1;
-        } catch (IOException | InterruptedException ex) {
-            context.getSource().sendFailure(Component.literal("发送失败：" + ex.getMessage()));
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            AIPlayersMod.LOGGER.error("Send bot message interrupted for {}", name, ex);
+            context.getSource().sendFailure(Component.literal("发送失败：" + describeException(ex)));
+            return 0;
+        } catch (Exception ex) {
+            AIPlayersMod.LOGGER.error("Send bot message failed for {}", name, ex);
+            context.getSource().sendFailure(Component.literal("发送失败：" + describeException(ex)));
             return 0;
         }
     }
@@ -131,8 +159,14 @@ public final class AIPlayersCommands {
             MindcraftIntegrationService.stopBot(player, name);
             context.getSource().sendSuccess(() -> Component.literal("已停止 bot：" + name), true);
             return 1;
-        } catch (IOException | InterruptedException ex) {
-            context.getSource().sendFailure(Component.literal("停止失败：" + ex.getMessage()));
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            AIPlayersMod.LOGGER.error("Stop bot interrupted for {}", name, ex);
+            context.getSource().sendFailure(Component.literal("停止失败：" + describeException(ex)));
+            return 0;
+        } catch (Exception ex) {
+            AIPlayersMod.LOGGER.error("Stop bot failed for {}", name, ex);
+            context.getSource().sendFailure(Component.literal("停止失败：" + describeException(ex)));
             return 0;
         }
     }
@@ -144,8 +178,14 @@ public final class AIPlayersCommands {
             MindcraftIntegrationService.removeBot(player, name);
             context.getSource().sendSuccess(() -> Component.literal("已删除 bot：" + name), true);
             return 1;
-        } catch (IOException | InterruptedException ex) {
-            context.getSource().sendFailure(Component.literal("删除失败：" + ex.getMessage()));
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            AIPlayersMod.LOGGER.error("Remove bot interrupted for {}", name, ex);
+            context.getSource().sendFailure(Component.literal("删除失败：" + describeException(ex)));
+            return 0;
+        } catch (Exception ex) {
+            AIPlayersMod.LOGGER.error("Remove bot failed for {}", name, ex);
+            context.getSource().sendFailure(Component.literal("删除失败：" + describeException(ex)));
             return 0;
         }
     }
@@ -176,5 +216,13 @@ public final class AIPlayersCommands {
             throw PLAYER_ONLY.create();
         }
         return player;
+    }
+
+    private static String describeException(Exception ex) {
+        String message = ex.getMessage();
+        if (message == null || message.isBlank()) {
+            return ex.getClass().getSimpleName();
+        }
+        return message;
     }
 }

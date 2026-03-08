@@ -3,6 +3,8 @@ package com.mcmod.aiplayers.mindcraft;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.ProxySelector;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -13,12 +15,17 @@ import java.util.List;
 
 public final class MindcraftBridgeClient {
     private static final Gson GSON = new GsonBuilder().create();
+    private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(4))
+            .version(HttpClient.Version.HTTP_1_1)
+            .proxy(ProxySelector.of((InetSocketAddress) null))
+            .build();
 
     private MindcraftBridgeClient() {
     }
 
     public static URI panelUri() {
-        return URI.create("http://localhost:" + MindcraftConfigManager.getConfig().mindserverPort());
+        return URI.create("http://" + resolveLoopbackHost() + ":" + MindcraftConfigManager.getConfig().mindserverPort());
     }
 
     public static HealthResponse health() throws IOException, InterruptedException {
@@ -62,7 +69,8 @@ public final class MindcraftBridgeClient {
 
     private static <T> T readJson(String method, String path, Object body, Class<T> responseType) throws IOException, InterruptedException {
         HttpRequest.Builder builder = HttpRequest.newBuilder(baseUri(path))
-                .timeout(Duration.ofSeconds(8));
+                .timeout(Duration.ofSeconds(8))
+                .header("Accept", "application/json");
         if (body == null) {
             if ("DELETE".equalsIgnoreCase(method)) {
                 builder.DELETE();
@@ -73,10 +81,7 @@ public final class MindcraftBridgeClient {
             builder.header("Content-Type", "application/json")
                     .method(method, HttpRequest.BodyPublishers.ofString(GSON.toJson(body), StandardCharsets.UTF_8));
         }
-        HttpResponse<String> response = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(4))
-                .build()
-                .send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        HttpResponse<String> response = HTTP_CLIENT.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             throw new IOException("Mindcraft bridge request failed: HTTP " + response.statusCode() + " body=" + response.body());
         }
@@ -88,6 +93,14 @@ public final class MindcraftBridgeClient {
 
     private static URI baseUri(String path) {
         return panelUri().resolve(path);
+    }
+
+    private static String resolveLoopbackHost() {
+        String configuredHost = MindcraftConfigManager.getConfig().host();
+        if (configuredHost == null || configuredHost.isBlank() || "0.0.0.0".equals(configuredHost) || "localhost".equalsIgnoreCase(configuredHost)) {
+            return "127.0.0.1";
+        }
+        return configuredHost;
     }
 
     public static final class CreateBotRequest {

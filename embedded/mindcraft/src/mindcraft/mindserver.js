@@ -5,6 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import * as mindcraft from './mindcraft.js';
 import { readFileSync } from 'fs';
+import { readJsonFile } from '../utils/json.js';
 import settings from '../../settings.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -19,7 +20,7 @@ let server;
 const agent_connections = {};
 const agent_listeners = [];
 
-const settings_spec = JSON.parse(readFileSync(path.join(__dirname, 'public/settings_spec.json'), 'utf8'));
+const settings_spec = readJsonFile(path.join(__dirname, 'public/settings_spec.json'));
 
 class AgentConnection {
     constructor(agentSettings, viewerPort) {
@@ -365,7 +366,7 @@ function applySettingsDefaults(rawSettings) {
 
 function buildAgentSettings(payload) {
     const profilePath = path.resolve(process.cwd(), String(payload.profilePath || './andy.json').trim());
-    const profile = JSON.parse(readFileSync(profilePath, 'utf8'));
+    const profile = readJsonFile(profilePath);
     if (payload.profile && typeof payload.profile === 'object') {
         Object.assign(profile, payload.profile);
     }

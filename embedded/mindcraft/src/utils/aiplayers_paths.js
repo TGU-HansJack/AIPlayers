@@ -1,6 +1,6 @@
 import path from 'path';
 
-function resolveBaseDir() {
+function resolveDataRoot() {
     const configured = process.env.AIPLAYERS_BOTS_ROOT;
     if (configured && configured.trim().length > 0) {
         return path.resolve(configured.trim());
@@ -8,12 +8,24 @@ function resolveBaseDir() {
     return path.resolve('./bots');
 }
 
+export function getRuntimeRoot() {
+    return path.resolve('.');
+}
+
+export function getRuntimeBotsRoot() {
+    return path.join(getRuntimeRoot(), 'bots');
+}
+
+export function getRuntimeBotAssetPath(...segments) {
+    return path.join(getRuntimeBotsRoot(), ...segments);
+}
+
 export function getBotsRoot() {
-    return resolveBaseDir();
+    return resolveDataRoot();
 }
 
 export function getBotRoot(name) {
-    return path.join(resolveBaseDir(), name);
+    return path.join(resolveDataRoot(), name);
 }
 
 export function getBotSubPath(name, ...segments) {
