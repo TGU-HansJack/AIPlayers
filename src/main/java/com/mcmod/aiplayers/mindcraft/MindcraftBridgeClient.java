@@ -110,7 +110,7 @@ public final class MindcraftBridgeClient {
         public String host;
         public int port;
         public String profilePath;
-        public boolean renderBotView = true;
+        public boolean renderBotView = false;
         public boolean speak = false;
         public String language = "zh";
         public boolean loadMemory = true;

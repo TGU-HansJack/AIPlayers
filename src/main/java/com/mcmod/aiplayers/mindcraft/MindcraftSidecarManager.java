@@ -149,7 +149,7 @@ public final class MindcraftSidecarManager {
         root.addProperty("speak", false);
         root.addProperty("chat_ingame", true);
         root.addProperty("language", "zh");
-        root.addProperty("render_bot_view", true);
+        root.addProperty("render_bot_view", false);
         root.addProperty("allow_insecure_coding", false);
         root.addProperty("allow_vision", false);
         root.add("blocked_actions", new JsonArray());

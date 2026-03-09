@@ -13,7 +13,7 @@ public final class MindcraftIntegrationService {
 
     public static MindcraftBotInfo spawnBot(ServerPlayer owner, String botName) throws IOException, InterruptedException {
         MinecraftServer server = owner.level().getServer();
-        ensureReady(server);
+        ensureSpawnReady(server);
         int port = resolveJoinPort(server);
         CreateBotRequest request = new CreateBotRequest();
         request.name = botName;
@@ -22,6 +22,7 @@ public final class MindcraftIntegrationService {
         request.host = MindcraftConfigManager.getConfig().host();
         request.port = port;
         request.profilePath = MindcraftConfigManager.getConfig().defaultProfile();
+        request.renderBotView = false;
 
         MindcraftBotInfo created;
         try {
@@ -57,7 +58,7 @@ public final class MindcraftIntegrationService {
     }
 
     public static List<MindcraftBotInfo> listLiveBots(MinecraftServer server) throws IOException, InterruptedException {
-        ensureReady(server);
+        ensureBridgeReady(server);
         List<MindcraftBotInfo> bots = MindcraftBridgeClient.listBots();
         MindcraftSessionSavedData data = MindcraftSessionSavedData.get(server);
         for (MindcraftBotInfo bot : bots) {
@@ -71,7 +72,7 @@ public final class MindcraftIntegrationService {
     }
 
     public static MindcraftBotInfo getBotStatus(MinecraftServer server, String botName) throws IOException, InterruptedException {
-        ensureReady(server);
+        ensureBridgeReady(server);
         MindcraftBotInfo info = MindcraftBridgeClient.getBot(botName);
         if (info != null) {
             MindcraftSessionSavedData.get(server).upsert(info, null, info.ownerName);
@@ -81,19 +82,19 @@ public final class MindcraftIntegrationService {
 
     public static void sendMessage(ServerPlayer sender, String botName, String message) throws IOException, InterruptedException {
         MindcraftSessionSavedData.MindcraftBotSession session = requireOwnedSession(sender, botName);
-        ensureReady(sender.level().getServer());
+        ensureBridgeReady(sender.level().getServer());
         MindcraftBridgeClient.sendMessage(session.name(), sender.getName().getString(), message);
     }
 
     public static void stopBot(ServerPlayer sender, String botName) throws IOException, InterruptedException {
         MindcraftSessionSavedData.MindcraftBotSession session = requireOwnedSession(sender, botName);
-        ensureReady(sender.level().getServer());
+        ensureBridgeReady(sender.level().getServer());
         MindcraftBridgeClient.stopBot(session.name());
     }
 
     public static void removeBot(ServerPlayer sender, String botName) throws IOException, InterruptedException {
         MindcraftSessionSavedData.MindcraftBotSession session = requireOwnedSession(sender, botName);
-        ensureReady(sender.level().getServer());
+        ensureBridgeReady(sender.level().getServer());
         MindcraftBridgeClient.removeBot(session.name());
         MindcraftSessionSavedData.get(sender.level().getServer()).remove(session.name());
     }
@@ -111,9 +112,17 @@ public final class MindcraftIntegrationService {
     }
 
     public static void ensureReady(MinecraftServer server) throws IOException, InterruptedException {
+        ensureSpawnReady(server);
+    }
+
+    private static void ensureBridgeReady(MinecraftServer server) throws IOException, InterruptedException {
         MindcraftConfigManager.initialize();
-        validateServerJoinability(server);
         MindcraftSidecarManager.ensureRunning(server);
+    }
+
+    private static void ensureSpawnReady(MinecraftServer server) throws IOException, InterruptedException {
+        ensureBridgeReady(server);
+        validateServerJoinability(server);
     }
 
     private static MindcraftSessionSavedData.MindcraftBotSession requireOwnedSession(ServerPlayer sender, String botName) throws IOException, InterruptedException {
